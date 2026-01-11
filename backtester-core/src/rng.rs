@@ -1,5 +1,5 @@
-use rand::rngs::SmallRng;
 use rand::SeedableRng;
+use rand::rngs::SmallRng;
 
 /// Create a reproducible RNG from a user-provided seed.
 ///
@@ -25,4 +25,3 @@ mod tests {
         assert_eq!(rng1.next_u64(), rng2.next_u64());
     }
 }
-

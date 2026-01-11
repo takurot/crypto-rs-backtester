@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use backtester_core::{fixtures, EventKind, EventQueue, OrderBookL2, Side};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use backtester_core::{EventKind, EventQueue, OrderBookL2, Side, fixtures};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 fn bench_event_loop_1m_ticks(c: &mut Criterion) {
     c.bench_function("bench_event_loop_1m_ticks", |b| {
@@ -52,4 +52,3 @@ criterion_group!(
     targets = bench_event_loop_1m_ticks, bench_orderbook_apply_l2_1m_updates
 );
 criterion_main!(benches);
-

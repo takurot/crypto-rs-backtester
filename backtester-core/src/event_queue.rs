@@ -78,9 +78,7 @@ mod tests {
         q.push(e0);
         q.push(e1);
 
-        let popped: Vec<u64> = (0..3)
-            .map(|_| q.pop().expect("event").seq())
-            .collect();
+        let popped: Vec<u64> = (0..3).map(|_| q.pop().expect("event").seq()).collect();
         assert_eq!(popped, vec![0, 1, 2]);
 
         // Smoke: verify kinds are preserved.
@@ -92,4 +90,3 @@ mod tests {
         }
     }
 }
-

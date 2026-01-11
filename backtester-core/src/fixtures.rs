@@ -31,7 +31,14 @@ pub fn l2_update(ts_exchange: i64, seq: u64, price: i64, qty: i64, side: Side) -
     }
 }
 
-pub fn order_limit(order_id: u64, ts_submit: i64, seq: u64, price: i64, qty: i64, side: Side) -> Order {
+pub fn order_limit(
+    order_id: u64,
+    ts_submit: i64,
+    seq: u64,
+    price: i64,
+    qty: i64,
+    side: Side,
+) -> Order {
     Order {
         order_id,
         ts_submit,
@@ -153,4 +160,3 @@ mod tests {
         assert_eq!(stream[3].seq, 3);
     }
 }
-

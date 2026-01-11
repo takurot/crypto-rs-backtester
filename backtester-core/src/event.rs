@@ -29,4 +29,3 @@ impl Event {
         self.id.seq
     }
 }
-

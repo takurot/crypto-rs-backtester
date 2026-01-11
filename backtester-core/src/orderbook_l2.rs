@@ -70,4 +70,3 @@ mod tests {
         assert_eq!(ob.best_bid(), None);
     }
 }
-
