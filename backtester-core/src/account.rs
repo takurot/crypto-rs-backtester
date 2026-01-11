@@ -122,4 +122,3 @@ mod tests {
         assert_eq!(acct.position_qty(fixtures::SYMBOL_ID_BTC_USDT), 1_00000000);
     }
 }
-

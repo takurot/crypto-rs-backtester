@@ -238,4 +238,3 @@ mod tests {
         assert_eq!(qm.check_fill(&order, 2, &t3, &mut state), 2);
     }
 }
-

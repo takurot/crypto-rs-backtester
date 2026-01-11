@@ -23,7 +23,6 @@ struct LiveOrder<S> {
 pub struct ExchangeSimulator<Q: QueueModel> {
     book: OrderBookL2,
     queue_model: Q,
-    next_order_id: u64,
     orders: BTreeMap<u64, LiveOrder<Q::State>>,
 }
 
@@ -32,7 +31,6 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
         Self {
             book: OrderBookL2::new(),
             queue_model,
-            next_order_id: 1,
             orders: BTreeMap::new(),
         }
     }
@@ -44,10 +42,9 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
     /// Submit an order to the exchange.
     ///
     /// Returns the generated order_id and transitions the order to `PendingNew`.
-    pub fn submit_order(&mut self, mut order: Order) -> u64 {
-        let order_id = self.next_order_id;
-        self.next_order_id = self.next_order_id.wrapping_add(1);
-        order.order_id = order_id;
+    pub fn submit_order(&mut self, order: Order) -> u64 {
+        let order_id = order.order_id;
+        debug_assert!(order_id != 0, "order_id must be assigned by the engine");
 
         let queue_state = self.queue_model.register_order(&order, &self.book);
         self.orders.insert(
@@ -125,6 +122,11 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
         self.orders.get(&order_id).map(|o| o.remaining_qty)
     }
 
+    /// Remove an order from the active set (typically called when terminal).
+    pub fn remove_order(&mut self, order_id: u64) {
+        self.orders.remove(&order_id);
+    }
+
     /// Process a market trade tick and generate order reports for any fills.
     pub fn on_trade(&mut self, trade: Tick) -> Vec<OrderReport> {
         let mut reports = Vec::new();
@@ -185,7 +187,7 @@ mod tests {
     fn test_exchange_submit_transitions_to_pending_new() {
         let mut ex = ExchangeSimulator::new(NoopQueue);
         let order = Order {
-            order_id: 0,
+            order_id: 1,
             ts_submit: 1_000,
             seq: 0,
             symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
@@ -203,7 +205,7 @@ mod tests {
     fn test_exchange_cancel_transitions_to_pending_cancel() {
         let mut ex = ExchangeSimulator::new(NoopQueue);
         let order = Order {
-            order_id: 0,
+            order_id: 1,
             ts_submit: 1_000,
             seq: 0,
             symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
@@ -227,7 +229,7 @@ mod tests {
         ex.apply_l2_update(&fixtures::l2_update(1_000, 0, 100, 10, Side::Buy));
 
         let order = Order {
-            order_id: 0,
+            order_id: 1,
             ts_submit: 1_000,
             seq: 0,
             symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
@@ -295,7 +297,7 @@ mod tests {
         let mut ex = ExchangeSimulator::new(ConservativeQueue);
 
         let order = Order {
-            order_id: 0,
+            order_id: 1,
             ts_submit: 1_000,
             seq: 0,
             symbol_id: fixtures::SYMBOL_ID_BTC_USDT,

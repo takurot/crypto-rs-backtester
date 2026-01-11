@@ -7,6 +7,7 @@ use crate::exchange_simulator::ExchangeSimulator;
 use crate::latency_model::LatencyModel;
 use crate::queue_model::QueueModel;
 use crate::rng::make_small_rng;
+use crate::stats::{BacktestStats, TradeFill, TradeLog, calculate_stats};
 use crate::types::{FundingEvent, Order, OrderReport, Tick, TsLocalNs, TsSimNs};
 use rand::rngs::SmallRng;
 
@@ -124,14 +125,21 @@ impl<'a> Context<'a> {
 
 /// Discrete-event simulation engine.
 #[derive(Debug)]
-pub struct Engine<Q: QueueModel, S: Strategy, L: LatencyModel> {
+pub struct Engine<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> {
     config: EngineConfig,
     queue: EventQueue,
-    exchange: ExchangeSimulator<Q>,
+    /// Prototype queue model used when instantiating a new per-symbol exchange simulator.
+    queue_model: Q,
+    /// One exchange simulator per `(exchange, symbol)` stream (represented by `symbol_id`).
+    exchanges: BTreeMap<u32, ExchangeSimulator<Q>>,
+    /// Route `order_id -> symbol_id` so ACK/cancel events can find the right exchange instance.
+    order_symbol_by_id: BTreeMap<u64, u32>,
+    next_order_id: u64,
     strategy: S,
     latency_model: L,
     rng: SmallRng,
     account: Account,
+    trade_log: TradeLog,
     market: MarketView,
     truth_last_trade_by_symbol: BTreeMap<u32, Tick>,
     next_event_seq: u64,
@@ -143,21 +151,20 @@ pub struct Engine<Q: QueueModel, S: Strategy, L: LatencyModel> {
     next_timer_id: u64,
 }
 
-impl<Q: QueueModel, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
-    pub fn new(
-        exchange: ExchangeSimulator<Q>,
-        strategy: S,
-        config: EngineConfig,
-        latency_model: L,
-    ) -> Self {
+impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
+    pub fn new(queue_model: Q, strategy: S, config: EngineConfig, latency_model: L) -> Self {
         Self {
             config,
             queue: EventQueue::new(),
-            exchange,
+            queue_model,
+            exchanges: BTreeMap::new(),
+            order_symbol_by_id: BTreeMap::new(),
+            next_order_id: 1,
             strategy,
             latency_model,
             rng: make_small_rng(config.seed),
             account: Account::default(),
+            trade_log: TradeLog::default(),
             market: MarketView::default(),
             truth_last_trade_by_symbol: BTreeMap::new(),
             next_event_seq: 0,
@@ -169,12 +176,31 @@ impl<Q: QueueModel, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
         }
     }
 
+    pub fn strategy(&self) -> &S {
+        &self.strategy
+    }
+
     pub fn market_view(&self) -> &MarketView {
         &self.market
     }
 
     pub fn account(&self) -> &Account {
         &self.account
+    }
+
+    pub fn trade_log(&self) -> &TradeLog {
+        &self.trade_log
+    }
+
+    pub fn stats(&self) -> BacktestStats {
+        calculate_stats(&self.trade_log)
+    }
+
+    fn exchange_mut(&mut self, symbol_id: u32) -> &mut ExchangeSimulator<Q> {
+        let qm = self.queue_model.clone();
+        self.exchanges
+            .entry(symbol_id)
+            .or_insert_with(|| ExchangeSimulator::new(qm))
     }
 
     pub fn push_event(&mut self, ts_sim: TsSimNs, kind: EventKind) {
@@ -211,14 +237,40 @@ impl<Q: QueueModel, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             EventKind::Tick(tick) => {
                 self.truth_last_trade_by_symbol.insert(tick.symbol_id, tick);
                 // Market truth drives the exchange simulator only.
-                let reports = self.exchange.on_trade(tick);
-                for r in reports {
-                    if r.last_fill_qty > 0 {
-                        if let Some(order) = self.exchange.get_order(r.order_id) {
-                            self.account.on_fill(&order, r.last_fill_qty);
+                let mut fills: Vec<(Order, i64)> = Vec::new();
+                let mut trade_fills: Vec<TradeFill> = Vec::new();
+                let reports = {
+                    // Scope the mutable borrow of `self.exchanges` to avoid borrow conflicts.
+                    let ex = self.exchange_mut(tick.symbol_id);
+                    let reports = ex.on_trade(tick);
+                    for r in &reports {
+                        if r.last_fill_qty > 0
+                            && let Some(order) = ex.get_order(r.order_id)
+                        {
+                            fills.push((order, r.last_fill_qty));
+                            trade_fills.push(TradeFill {
+                                ts_exchange: tick.ts_exchange,
+                                symbol_id: r.symbol_id,
+                                order_id: r.order_id,
+                                side: order.side,
+                                price: r.last_fill_price,
+                                qty: r.last_fill_qty,
+                            });
                         }
                     }
-                    let ts_delivery = tick.ts_exchange + self.config.order_update_latency_ns;
+                    reports
+                };
+
+                for f in trade_fills {
+                    self.trade_log.push_fill(f);
+                }
+
+                for (order, fill_qty) in fills {
+                    self.account.on_fill(&order, fill_qty);
+                }
+
+                let ts_delivery = tick.ts_exchange + self.config.order_update_latency_ns;
+                for r in reports {
                     self.push_event(ts_delivery, EventKind::OrderReport(r));
                 }
             }
@@ -247,10 +299,11 @@ impl<Q: QueueModel, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 }
             }
             EventKind::L2Update(update) => {
-                self.exchange.apply_l2_update(&update);
+                self.exchange_mut(update.symbol_id).apply_l2_update(&update);
             }
             EventKind::Order(order) => {
-                let order_id = self.exchange.submit_order(order);
+                let order_id = order.order_id;
+                self.exchange_mut(order.symbol_id).submit_order(order);
                 let dt = self
                     .latency_model
                     .sample_order_latency(self.now_ts_sim, &mut self.rng)
@@ -259,10 +312,16 @@ impl<Q: QueueModel, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 self.push_event(ts_ack, EventKind::OrderAck { order_id });
             }
             EventKind::OrderAck { order_id } => {
-                let _ = self.exchange.ack_new(order_id);
+                if let Some(&symbol_id) = self.order_symbol_by_id.get(&order_id) {
+                    let _ = self.exchange_mut(symbol_id).ack_new(order_id);
+                }
             }
             EventKind::OrderCancel { order_id } => {
-                if self.exchange.cancel_order(order_id).is_ok() {
+                let Some(&symbol_id) = self.order_symbol_by_id.get(&order_id) else {
+                    // Unknown order_id: ignore.
+                    return Some(event);
+                };
+                if self.exchange_mut(symbol_id).cancel_order(order_id).is_ok() {
                     let dt = self
                         .latency_model
                         .sample_order_latency(self.now_ts_sim, &mut self.rng)
@@ -272,12 +331,21 @@ impl<Q: QueueModel, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 }
             }
             EventKind::OrderCancelAck { order_id } => {
-                if let Ok(report) = self.exchange.ack_cancel(order_id) {
+                if let Some(&symbol_id) = self.order_symbol_by_id.get(&order_id)
+                    && let Ok(report) = self.exchange_mut(symbol_id).ack_cancel(order_id)
+                {
                     let ts_delivery = self.now_ts_sim + self.config.order_update_latency_ns;
                     self.push_event(ts_delivery, EventKind::OrderReport(report));
                 }
             }
             EventKind::OrderReport(report) => {
+                if report.status.is_terminal() {
+                    if let Some(&symbol_id) = self.order_symbol_by_id.get(&report.order_id) {
+                        self.exchange_mut(symbol_id).remove_order(report.order_id);
+                    }
+                    self.order_symbol_by_id.remove(&report.order_id);
+                }
+
                 match self.config.mode {
                     EngineMode::Tick => {
                         let mut ctx = Context::new(self.now_ts_sim, &self.market);
@@ -296,7 +364,11 @@ impl<Q: QueueModel, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                     .get(&event.symbol_id)
                     .map(|t| t.price)
                     .unwrap_or(0);
-                let _ = self.account.apply_funding(&event, mark_price);
+                let pnl = self.account.apply_funding(&event, mark_price);
+                self.trade_log.push_pnl_event(crate::stats::PnlEvent {
+                    ts_exchange: event.ts_exchange,
+                    pnl,
+                });
 
                 match self.config.mode {
                     EngineMode::Tick => {
@@ -341,6 +413,11 @@ impl<Q: QueueModel, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                     // Default: schedule the order to arrive at the exchange immediately at `ts_local`.
                     // `order_id` is assigned by the exchange simulator.
                     order.ts_submit = ts_local;
+                    // Engine-assigned, globally unique order_id for deterministic routing.
+                    let order_id = self.next_order_id;
+                    self.next_order_id = self.next_order_id.wrapping_add(1);
+                    order.order_id = order_id;
+                    self.order_symbol_by_id.insert(order_id, order.symbol_id);
                     self.push_event(ts_local, EventKind::Order(order));
                 }
                 Command::CancelOrder { order_id } => {
@@ -366,7 +443,8 @@ impl<Q: QueueModel, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
         }
 
         if !self.report_buffer.is_empty() {
-            self.strategy.on_order_updates(&self.report_buffer, &mut ctx);
+            self.strategy
+                .on_order_updates(&self.report_buffer, &mut ctx);
             self.report_buffer.clear();
         }
 
@@ -378,7 +456,6 @@ impl<Q: QueueModel, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
 mod tests {
     use super::*;
 
-    use crate::exchange_simulator::ExchangeSimulator;
     use crate::fixtures;
     use crate::latency_model::ConstantLatency;
     use crate::queue_model::ConservativeQueue;
@@ -431,13 +508,12 @@ mod tests {
             seed: 42,
         };
 
-        let exchange = ExchangeSimulator::new(ConservativeQueue);
         let strategy = RecordingStrategy::default();
         let latency_model = ConstantLatency {
             feed_latency_ns: config.feed_latency_ns,
             order_latency_ns: 0,
         };
-        let mut eng = Engine::new(exchange, strategy, config, latency_model);
+        let mut eng = Engine::new(ConservativeQueue, strategy, config, latency_model);
 
         // Tick #0 (truth at ts_exchange=1_000, delivered at ts_local=2_000)
         let t0_truth = fixtures::tick_trade(1_000, 1_000, 0);
@@ -487,13 +563,12 @@ mod tests {
             max_batch_ns: 0,
             seed: 42,
         };
-        let exchange = ExchangeSimulator::new(ConservativeQueue);
-        let strategy = NoopStrategy::default();
+        let strategy = NoopStrategy;
         let latency_model = ConstantLatency {
             feed_latency_ns: config.feed_latency_ns,
             order_latency_ns: 0,
         };
-        let mut eng = Engine::new(exchange, strategy, config, latency_model);
+        let mut eng = Engine::new(ConservativeQueue, strategy, config, latency_model);
 
         let t0_truth = fixtures::tick_trade(1_000, 1_000, 0);
         let t0_delivery = Tick {
@@ -506,7 +581,10 @@ mod tests {
 
         // Process truth tick first: MarketView must not update.
         eng.step().expect("truth tick");
-        assert_eq!(eng.market_view().last_trade(fixtures::SYMBOL_ID_BTC_USDT), None);
+        assert_eq!(
+            eng.market_view().last_trade(fixtures::SYMBOL_ID_BTC_USDT),
+            None
+        );
 
         // Process delivery: MarketView updates exactly at ts_local.
         eng.step().expect("delivery tick");
@@ -527,13 +605,12 @@ mod tests {
             max_batch_ns: 0,
             seed: 42,
         };
-        let exchange = ExchangeSimulator::new(ConservativeQueue);
         let strategy = RecordingStrategy::default();
         let latency_model = ConstantLatency {
             feed_latency_ns: config.feed_latency_ns,
             order_latency_ns: 0,
         };
-        let mut eng = Engine::new(exchange, strategy, config, latency_model);
+        let mut eng = Engine::new(ConservativeQueue, strategy, config, latency_model);
 
         // Tick #0: submit the order on delivery at ts=1_000.
         let t0_truth = fixtures::tick_trade(1_000, 1_000, 0);
@@ -581,5 +658,74 @@ mod tests {
         // Notional=100.00, rate=0.0001 => pay 0.01
         assert_eq!(eng.account().total_funding_pnl(), -1_000_000);
     }
-}
 
+    #[test]
+    fn test_engine_order_lifecycle_cleanup() {
+        let config = EngineConfig {
+            feed_latency_ns: 0,
+            order_update_latency_ns: 0,
+            mode: EngineMode::Tick,
+            max_batch_ns: 0,
+            seed: 42,
+        };
+        let strategy = RecordingStrategy::default();
+        let mut eng = Engine::new(
+            ConservativeQueue,
+            strategy,
+            config,
+            ConstantLatency {
+                feed_latency_ns: 0,
+                order_latency_ns: 0,
+            },
+        );
+
+        // 1. Submit order
+        let t0 = fixtures::tick_trade(1_000, 1_000, 0);
+        eng.push_event(1_000, EventKind::TickDelivery(t0));
+        eng.step().expect("tick delivery");
+        eng.step().expect("order arrival at exchange");
+
+        assert_eq!(eng.order_symbol_by_id.len(), 1);
+        let order_id = 1;
+        assert!(
+            eng.exchanges
+                .get(&fixtures::SYMBOL_ID_BTC_USDT)
+                .unwrap()
+                .get_order(order_id)
+                .is_some()
+        );
+
+        // 2. ACK order
+        eng.step().expect("ack");
+
+        // 3. Fill order
+        let t1 = Tick {
+            ts_exchange: 2_000,
+            ts_local: 2_000,
+            seq: 1,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            price: 100_00000000,
+            qty: 1_00000000,
+            side: Side::Sell,
+            flags: 0x01,
+        };
+        eng.push_event(2_000, EventKind::Tick(t1));
+        eng.step().expect("tick truth");
+
+        // At this point OrderReport(Filled) is scheduled but not processed.
+        assert_eq!(eng.order_symbol_by_id.len(), 1);
+
+        // 4. Process OrderReport
+        eng.step().expect("report");
+
+        // Cleanup should have happened.
+        assert_eq!(eng.order_symbol_by_id.len(), 0);
+        assert!(
+            eng.exchanges
+                .get(&fixtures::SYMBOL_ID_BTC_USDT)
+                .unwrap()
+                .get_order(order_id)
+                .is_none()
+        );
+    }
+}
