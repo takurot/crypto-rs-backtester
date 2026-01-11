@@ -22,3 +22,6 @@ python/rust_backtester/*.dll
 ._*
 .idea/
 .vscode/
+
+# Docs
+docs/START.txt
