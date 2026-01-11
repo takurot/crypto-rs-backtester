@@ -268,7 +268,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
 ## Phase 4: Production Readiness
 **Goal**: Optimizations, multi-venue support, and reporting.
 
-- [ ] **4.1 Multi-Venue Support** `[Depends on 1.3.1]`
+- [x] **4.1 Multi-Venue Support** `[Depends on 1.3.1]`
     - Update `symbol_id` mapping to support `(Exchange, Symbol)`.
     - Instantiate multiple `ExchangeSimulator` instances within the same deterministic event loop.
     - **Deliverable**: Arbitrage strategy test between two simulated exchanges.
@@ -276,7 +276,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
         - `test_multi_venue_event_ordering_by_ts_sim()`
         - `test_arbitrage_two_venues_smoke()`
 
-- [ ] **4.2 Result Statistics** `[Depends on 2.1.2]`
+- [x] **4.2 Result Statistics** `[Depends on 2.1.2]`
     - Implement `TradeLog` collector in Rust.
     - Implement `calculate_stats()` (Sharpe, Drawdown) in Rust.
     - Return stats as a Python Dict or Polars DF.
@@ -285,7 +285,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
         - `test_stats_max_drawdown_matches_reference()`
         - `test_stats_total_pnl_fixed_point_consistency()`
 
-- [ ] **4.3 Benchmarking & CI**
+- [x] **4.3 Benchmarking & CI**
     - Ensure Criterion benches cover: event loop, order book updates, batch callback overhead (where measurable).
     - Set up CI to run: Rust unit/integration tests + Python E2E tests (and optionally benches on a schedule).
     - **Deliverable**: Automated CI pipeline.

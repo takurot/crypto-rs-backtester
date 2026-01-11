@@ -1,0 +1,48 @@
+name: Bench (scheduled)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 0" # weekly
+
+jobs:
+  rust-bench:
+    name: Rust benches (criterion)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo bench (core)
+        run: cargo bench -p backtester-core
+
+  python-bench:
+    name: Python bench-style tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install deps + build extension
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install -U pip
+          python -m pip install -e ".[dev]"
+
+      - name: pytest (bench)
+        run: |
+          . .venv/bin/activate
+          pytest -m bench python/tests
+
