@@ -1,0 +1,293 @@
+# Implementation Plan
+
+This document outlines the detailed implementation tasks for the Rust-based Tick-level Backtester, derived from `docs/SPEC.md`.
+
+## Status Legend
+- [ ] Not Started
+- [/] In Progress
+- [x] Completed
+
+---
+
+## Test Naming & Layout Conventions (Applies to tasks below)
+- **Rust unit tests**: co-located in `backtester-core/src/**` using `#[cfg(test)] mod tests { ... }`
+  - Naming: `test_<unit>_<behavior>_<expected>()`
+- **Rust integration tests**: `backtester-core/tests/test_<area>.rs`
+  - Naming: `test_<area>_<scenario>()`
+- **Python E2E tests**: `python/tests/test_e2e_<area>.py` (pytest)
+  - Naming: `test_e2e_<area>_<scenario>()`
+- **Benchmark naming**:
+  - Criterion: `bench_<area>_<case>()`
+  - Python perf (optional): `test_bench_<area>_<case>()` (using `pytest-benchmark`, marked separately from correctness tests)
+
+## Phase 0: Quality Gates & Tooling Baseline
+**Goal**: Establish deterministic test/bench harnesses early so performance and correctness regressions are caught immediately.
+
+### 0.1 Rust Unit/Integration Test Scaffolding
+- [ ] **0.1.1 Test Harness & Fixtures**
+    - Add a shared fixtures module for tiny deterministic event streams (in-memory, no heavy datasets).
+    - Define helper builders for `Tick`, `L2Update`, `Order`, and `Event` with explicit timestamps and sequence IDs.
+    - **Deliverable**: `cargo test` runs a minimal suite in < 1s.
+    - **Suggested tests**:
+        - `test_fixtures_smoke_builders()`
+
+- [ ] **0.1.2 Determinism Tests**
+    - Add tests asserting deterministic ordering for same-timestamp events (stable tie-breakers; no `HashMap` ordering dependence).
+    - Add tests asserting reproducibility given the same RNG seed.
+    - **Deliverable**: Re-running tests produces bit-identical results (where applicable).
+    - **Suggested tests**:
+        - `test_event_queue_tiebreak_stable()`
+        - `test_reproducible_with_seed()`
+
+### 0.2 Python E2E Test Scaffolding
+- [ ] **0.2.1 Pytest + Maturin Workflow**
+    - Add a `pytest` E2E test target that installs the extension module (e.g., via `maturin develop`) and runs end-to-end backtests.
+    - **Deliverable**: A single `pytest` command runs E2E tests locally/CI.
+    - **Suggested tests**:
+        - `test_e2e_import_and_run_smoke()`
+    - **E2E minimal data generation (Polars, generated on-the-fly)**:
+        - Create data inside tests (no external files) and pass it as a `LazyFrame`:
+
+```python
+import polars as pl
+
+def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
+    # Small deterministic stream: 4 ticks, 1 symbol, trade-only.
+    ts_exchange = [1_000, 2_000, 3_000, 4_000]
+    price = [100_00000000, 101_00000000,  99_00000000, 100_00000000]
+    qty =   [  1_00000000,   1_00000000,   1_00000000,   1_00000000]
+    side =  [           1,          -1,            1,          -1]
+    data = {"ts_exchange": ts_exchange, "price": price, "qty": qty, "side": side}
+    if with_seq:
+        data["seq"] = list(range(len(ts_exchange)))
+    return pl.DataFrame(data).lazy()
+```
+
+### 0.3 Benchmark Scaffolding (Rust + Python)
+- [ ] **0.3.1 Criterion Bench Harness (Rust Core)**
+    - Add `criterion` benches for core hot paths (event loop, order book updates).
+    - **Deliverable**: `cargo bench` produces a baseline report.
+    - **Suggested benches**:
+        - `bench_event_loop_1m_ticks()`
+        - `bench_orderbook_apply_l2_1m_updates()`
+
+- [ ] **0.3.2 Python Integration Bench Harness (Optional)**
+    - Add a lightweight benchmark for Rust↔Python batch callback overhead (e.g., `pytest-benchmark` or a dedicated timing script).
+    - **Deliverable**: A repeatable per-batch overhead measurement.
+    - **Suggested benches/tests**:
+        - `test_bench_python_batch_callback_overhead()`
+
+## Phase 1: Core Engine Integration (Rust)
+**Goal**: Establish the pure Rust simulation core with L2 matching engine and event loop.
+
+### 1.1 Project Scaffolding
+- [ ] **1.1.1 Initialize Rust Workspace**
+    - Create a new Cargo workspace.
+    - Setup crates: `backtester-core` (lib), `backtester-py` (cdylib).
+    - Add dependencies: `thiserror`, `serde`, `log`, `rust_decimal` (or `i64` implementation), `arrow`, `polars`.
+    - **Deliverable**: Compilable empty workspace.
+    - **Verification**:
+        - `cargo test` passes (no specific test required yet).
+
+- [ ] **1.1.2 Define Core Data Structures** `[Depends on 1.1.1]`
+    - Implement `FixedPoint` helper (satoshi precision).
+    - Define time axes types and naming: `ts_exchange`, `ts_local`, `ts_sim` (all nanoseconds).
+    - Define `Tick` (logical representation for callbacks/logging) with `ts_exchange` and `ts_local`.
+    - Define `Order`, `Side`, `OrderType` enums.
+    - Implement `OrderState` enum (`PendingNew`, `Open`, `Filled`, etc.).
+    - Define `OrderReport` (fills/cancels/rejects) used by strategy callbacks.
+    - **Deliverable**: `types.rs` with unit tests for fixed-point arithmetic and basic invariants.
+    - **Suggested tests**:
+        - `test_fixed_point_roundtrip_io_only()`
+        - `test_order_state_machine_basic_invariants()`
+
+- [ ] **1.1.3 Deterministic Event Model** `[Depends on 1.1.2]`
+    - Define a stable `EventId` / tie-breaker strategy for same-`ts_sim` events.
+    - Define an `Event` model that can represent market truth, feed deliveries, order arrivals/ACKs, funding, and timers.
+    - **Deliverable**: Unit tests proving stable ordering for same-timestamp events.
+    - **Suggested tests**:
+        - `test_event_ordering_same_ts_sim_uses_stable_tiebreak()`
+
+### 1.2 Matching Engine (L2)
+- [ ] **1.2.1 Implement OrderBook L2** `[Depends on 1.1.2]`
+    - Create `OrderBook` struct using `BTreeMap<Price, SideQueue>`.
+    - Implement `apply_l2_update(price, qty, side)` logic.
+    - Implement `get_best_bid/ask`.
+    - **Deliverable**: Unit tested L2 OrderBook that correctly updates state from diffs.
+    - **Suggested tests**:
+        - `test_orderbook_l2_apply_update_and_best_bid_ask()`
+        - `test_orderbook_l2_remove_level_with_qty_zero()`
+
+- [ ] **1.2.2 Implement ExchangeSimulator** `[Depends on 1.2.1]`
+    - Define `ExchangeSimulator` struct.
+    - Implement `submit_order` -> generates `OrderID` -> transitions to `PendingNew`.
+    - Implement `cancel_order` -> transitions to `PendingCancel`.
+    - **Deliverable**: Simulator that accepts orders and tracks their basic lifecycle.
+    - **Suggested tests**:
+        - `test_exchange_submit_transitions_to_pending_new()`
+        - `test_exchange_cancel_transitions_to_pending_cancel()`
+
+- [ ] **1.2.3 Conservative Queue Model** `[Depends on 1.2.2]`
+    - Implement `QueueModel` trait.
+    - Implement `ConservativeQueue` (LIFO logic).
+    - Integrate with `ExchangeSimulator`: Check for fills on every market trade event.
+    - **Deliverable**: Tests showing user orders get filled only after queue depletion.
+    - **Suggested tests**:
+        - `test_queue_conservative_user_is_last_in_queue()`
+
+### 1.3 Event Loop
+- [ ] **1.3.1 Global Event Queue (`ts_sim`)** `[Depends on 1.1.3]`
+    - Implement a `BinaryHeap`-based event queue ordered by `ts_sim` with deterministic tie-breakers.
+    - Event variants SHOULD cover: market data updates (truth), feed deliveries (strategy view), order arrivals/ACKs, order-update deliveries, funding, timers.
+    - **Deliverable**: Mechanism to push multiple streams and pop events in deterministic temporal order.
+    - **Suggested tests**:
+        - `test_global_event_queue_orders_by_ts_sim_then_tiebreak()`
+
+- [ ] **1.3.2 Basic Event Loop** `[Depends on 1.3.1]`
+    - Create `Engine` struct.
+    - Implement `run()` loop processing events one by one.
+    - Dispatch events to `ExchangeSimulator` (market truth) and `Strategy` (feed-delayed view).
+    - **Deliverable**: A test harness that runs a predefined sequence and verifies order execution deterministically.
+    - **Suggested tests**:
+        - `test_engine_run_smoke_deterministic_sequence()`
+
+- [ ] **1.3.3 MarketView & Look-ahead Prevention** `[Depends on 1.3.2]`
+    - Implement a feed-delayed `MarketView` that the strategy reads (consistent with `ts_local`).
+    - Ensure the matching engine uses ground-truth updates at `ts_exchange`, while strategy only sees delivered updates at `ts_local`.
+    - **Deliverable**: Unit/integration test that fails if the strategy can observe future (`ts_exchange`) information early.
+    - **Suggested tests**:
+        - `test_marketview_no_lookahead_with_feed_latency()`
+
+---
+
+## Phase 2: Python Integration
+**Goal**: Expose the Rust core to Python via PyO3 and enable Polars data ingestion.
+
+### 2.1 PyO3 Bindings
+- [ ] **2.1.1 Setup Maturin** `[Depends on 1.1.1]`
+    - Configure `pyproject.toml`.
+    - Create basic `#[pyclass]` for `Backtester`.
+    - **Deliverable**: `maturin develop` installs the package in a python venv.
+    - **Suggested tests**:
+        - `test_e2e_import_and_run_smoke()`
+
+- [ ] **2.1.2 Strategy Interface (FFI)** `[Depends on 2.1.1]`
+    - Define `Strategy` trait in Rust.
+    - Implement Python wrapper struct that holds a `PyObject` (the Python strategy instance).
+    - Support both modes:
+        - Tick mode: Rust calls Python `on_tick`.
+        - Batch mode: Rust calls Python `on_ticks` and `on_order_updates` (preferred).
+    - Add config surface aligned with SPEC (e.g., `python_mode`, `batch_ms`, `seed`).
+    - **Deliverable**: Python script can define a class and run in tick or batch mode with deterministic results.
+    - **Suggested tests**:
+        - `test_e2e_strategy_tick_mode_smoke()`
+        - `test_e2e_strategy_batch_mode_smoke()`
+
+### 2.2 Data Ingestion
+- [ ] **2.2.1 Polars / Arrow Conversion** `[Depends on 1.1.1]`
+    - Use `pyo3-polars` to accept Polars data (DataFrame/LazyFrame materialization strategy TBD).
+    - Validate schema and aliases per SPEC (`ts_exchange`/`ts_event`, `qty`/`size`, optional `seq`, optional `ts_local`).
+    - Implement columnar iteration over Arrow arrays (SoA) and avoid materializing a full `Vec<Tick>` for large datasets.
+    - **Deliverable**: Python passes a large Polars dataset, Rust processes it without a large memory spike.
+    - **Suggested tests**:
+        - `test_schema_accepts_ts_event_alias()`
+        - `test_schema_accepts_qty_size_alias()`
+
+- [ ] **2.2.2 Batch Processing** `[Depends on 2.2.1]`
+    - Buffer delivered ticks and wake Python on configurable conditions (max batch duration, any order update delivery, funding/timer).
+    - Ensure batch wakeups preserve determinism with stable ordering.
+    - **Deliverable**: Benchmarks showing > 1M ticks/sec throughput with batch mode enabled.
+    - **Suggested tests**:
+        - `test_batch_wakeup_max_batch_ms()`
+        - `test_batch_wakeup_on_order_update_delivery()`
+
+### 2.3 End-to-End (E2E) Tests (Python)
+- [ ] **2.3.1 Deterministic E2E Run** `[Depends on 2.1.2, 2.2.2]`
+    - E2E test: run the same backtest twice with the same seed and assert identical outputs (trades + stats).
+    - **Deliverable**: `pytest` E2E suite validates reproducibility.
+    - **Suggested tests**:
+        - `test_e2e_reproducible_seed()`
+    - **Data**: Use `make_minimal_ticks_lazyframe()` (above) to generate the input on-the-fly.
+
+- [ ] **2.3.2 Tick vs Batch Equivalence (Sanity)** `[Depends on 2.3.1]`
+    - E2E test: for a simple deterministic strategy, compare tick mode vs batch mode outputs (allowing expected minor differences only if explicitly documented).
+    - **Deliverable**: Confidence that batch mode does not change semantics.
+    - **Suggested tests**:
+        - `test_e2e_tick_vs_batch_equivalence()`
+    - **Data**: Use `make_minimal_ticks_lazyframe(with_seq=True)` to avoid ambiguous same-timestamp ordering.
+
+- [ ] **2.3.3 Look-ahead Bias Guard (E2E)** `[Depends on 1.3.3, 2.3.1]`
+    - E2E test: set non-zero feed latency and assert the strategy cannot act on market moves before `ts_local`.
+    - **Deliverable**: Regression guard preventing accidental “fast view” exposure in Python API.
+    - **Suggested tests**:
+        - `test_no_lookahead_with_feed_latency()`
+    - **Data generation approach**:
+        - Generate ticks at `ts_exchange=[1000, 2000, 3000, 4000]` and set a constant feed latency (e.g., 1000ns).
+        - Assert the strategy observes each tick at `ts_local == ts_exchange + 1000`.
+
+---
+
+## Phase 3: Advanced Microstructure
+**Goal**: Increase simulation fidelity with latency jitter and advanced queue models.
+
+### 3.1 Latency Models
+- [ ] **3.1.1 Latency Trait & Jitter** `[Depends on 1.3.2]`
+    - Implement `LatencyModel` trait.
+    - Implement `LogNormalJitter` using `rand` and `statrs` (or similar).
+    - Ensure RNG is owned/seeded by the engine for reproducibility (models MUST NOT keep RNG state internally).
+    - Update `ExchangeSimulator` to schedule ACK events in the future based on latency.
+    - **Deliverable**: Orders are not "Open" immediately; they appear after delay + reproducible results under fixed seed.
+    - **Suggested tests**:
+        - `test_latency_lognormal_is_reproducible_under_seed()`
+
+- [ ] **3.2 Order State Race Conditions** `[Depends on 3.1.1]`
+    - verify `PendingCancel` logic.
+    - Create test case: Send Cancel -> Market moves -> Order Fills -> Cancel Rejected.
+    - **Deliverable**: Validated robust state machine.
+    - **Suggested tests**:
+        - `test_pending_cancel_can_fill_before_cancel_ack()`
+
+### 3.2 Advanced Queues
+- [ ] **3.2.1 Volume Clock Queue** `[Depends on 1.2.3]`
+    - Implement `VolumeClockQueue` model.
+    - Logic: Track cumulative volume since order entry. Fill when `vol >= queue_pos`.
+    - **Deliverable**: More realistic fill rates on L2 data compared to Conservative model.
+    - **Suggested tests**:
+        - `test_queue_volume_clock_fills_when_cum_volume_exceeds_queue_pos()`
+
+### 3.3 Crypto Specifics
+- [ ] **3.3.1 Funding Rate Simulation** `[Depends on 1.3.2]`
+    - Add `FundingEvent` to data types.
+    - Implement periodic funding payment logic in `Account` struct.
+    - **Deliverable**: Positions incur funding costs/gains.
+    - **Suggested tests**:
+        - `test_funding_applied_at_scheduled_ts_exchange()`
+
+---
+
+## Phase 4: Production Readiness
+**Goal**: Optimizations, multi-venue support, and reporting.
+
+- [ ] **4.1 Multi-Venue Support** `[Depends on 1.3.1]`
+    - Update `symbol_id` mapping to support `(Exchange, Symbol)`.
+    - Instantiate multiple `ExchangeSimulator` instances within the same deterministic event loop.
+    - **Deliverable**: Arbitrage strategy test between two simulated exchanges.
+    - **Suggested tests**:
+        - `test_multi_venue_event_ordering_by_ts_sim()`
+        - `test_arbitrage_two_venues_smoke()`
+
+- [ ] **4.2 Result Statistics** `[Depends on 2.1.2]`
+    - Implement `TradeLog` collector in Rust.
+    - Implement `calculate_stats()` (Sharpe, Drawdown) in Rust.
+    - Return stats as a Python Dict or Polars DF.
+    - **Deliverable**: Complete backtest report generation.
+    - **Suggested tests**:
+        - `test_stats_max_drawdown_matches_reference()`
+        - `test_stats_total_pnl_fixed_point_consistency()`
+
+- [ ] **4.3 Benchmarking & CI**
+    - Ensure Criterion benches cover: event loop, order book updates, batch callback overhead (where measurable).
+    - Set up CI to run: Rust unit/integration tests + Python E2E tests (and optionally benches on a schedule).
+    - **Deliverable**: Automated CI pipeline.
+    - **Suggested tests**:
+        - `test_ci_runs_rust_and_python_suites_smoke()`
