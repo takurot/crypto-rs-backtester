@@ -291,3 +291,54 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Deliverable**: Automated CI pipeline.
     - **Suggested tests**:
         - `test_ci_runs_rust_and_python_suites_smoke()`
+
+---
+
+## Phase 5: Scale & Optimization (Future)
+**Goal**: Achieve true zero-copy ingestion, reduce memory overhead for long backtests, enable fast parameter sweeps, and make performance regressions observable—without breaking determinism / look-ahead prevention / fixed-point money rules.
+
+- [ ] **5.1 True Zero-Copy Ingestion (Arrow C Data Interface)** `[Depends on 2.2.1]`
+    - Accept an Arrow `RecordBatch` stream from Python (e.g., `pyarrow.RecordBatchReader`) via the Arrow C Data Interface.
+    - Implement a Rust-side columnar iterator (SoA) that reads required columns (`ts_exchange`, `price`, `qty`, `side`, optional `seq`, optional `ts_local`, optional `flags`) without materializing a full `Vec<Tick>`.
+    - Enforce/validate per-stream ordering by (`ts_exchange`, `seq`) ascending; reject unsorted streams rather than sorting internally (determinism + perf).
+    - **Deliverable**: 1GB-class dataset ingestion without a large memory spike; minimal Python↔Rust copying.
+    - **Suggested tests**:
+        - Rust: `test_tick_source_arrow_schema_aliases_smoke()`
+        - Python E2E: `test_e2e_arrow_stream_ingestion_smoke()`
+
+- [ ] **5.2 Streaming TickSource + Lazy Event Scheduling** `[Depends on 1.3.1, 5.1]`
+    - Introduce a `TickSource` abstraction per `(exchange, symbol)` stream that yields the next market-truth tick.
+    - Update the engine to advance each stream lazily (schedule only next truth + next delivery per stream; push subsequent ticks as prior ticks are consumed).
+    - Preserve global determinism with stable tie-breakers for same-`ts_sim` events (never rely on stream iteration order).
+    - **Deliverable**: Tick scheduling memory becomes \(O(\#streams)\), not \(O(\#ticks)\).
+    - **Suggested tests**:
+        - Rust integration: `test_engine_streaming_tick_source_equivalence_to_materialized()`
+    - **Suggested benches**:
+        - `bench_event_loop_streaming_1m_ticks()`
+
+- [ ] **5.3 Zero-Copy Result Export (Trades / Equity Curve)** `[Depends on 4.2, 5.1]`
+    - Add result export APIs that return Arrow/Polars objects backed by Rust buffers (avoid Python dict/list for large outputs).
+    - Provide `BacktestResult.trades_df()` and `BacktestResult.equity_curve_df()` (or equivalent) with a stable schema.
+    - **Deliverable**: Large trade logs can be analyzed in Python without a second full copy.
+    - **Suggested tests**:
+        - Python E2E: `test_e2e_result_trades_df_schema_and_values()`
+
+- [ ] **5.4 TradeLog Retention & Memory Controls** `[Depends on 4.2]`
+    - Add `TradeLogMode` (e.g., `All`, `RingBuffer(N)`, `SummaryOnly`, `None`) and expose it in the Python API.
+    - When `SummaryOnly` is enabled, compute aggregate stats incrementally and ensure the output matches the full-log computation for small deterministic inputs.
+    - **Deliverable**: Backtests can run for hours of data without unbounded memory growth.
+    - **Suggested tests**:
+        - Rust: `test_trade_log_ring_buffer_caps_size()`
+        - Rust: `test_stats_summary_only_matches_full_log_for_small_input()`
+
+- [ ] **5.5 Parallel Parameter Sweep Runner (Deterministic)** `[Depends on 2.1.2]`
+    - Provide a batch API to run many independent backtests (parameter search) in parallel (Rust-side concurrency).
+    - Derive per-run seeds deterministically from a base seed and input index; return results in stable input order.
+    - **Deliverable**: Parameter sweeps scale across cores without losing reproducibility.
+    - **Suggested tests**:
+        - Python E2E: `test_e2e_run_many_deterministic_and_ordered()`
+
+- [ ] **5.6 Benchmark Regression Observability (CI Artifacts)** `[Depends on 0.3.1, 4.3]`
+    - Upload Criterion reports as CI artifacts for each run.
+    - Keep scheduled benchmark runs (weekly) for baseline tracking; avoid hard performance gates unless methodology is robust.
+    - **Deliverable**: Performance trends are visible and regressions are easier to catch.

@@ -450,6 +450,57 @@ pub enum LogLevel {
 }
 ```
 
+### 6.6 Scalability & Performance Extensions (Future)
+This section specifies forward-looking optimizations that preserve the non-negotiable principles (determinism, fixed-point money, no look-ahead bias) while scaling to larger datasets and parameter sweeps.
+
+#### 6.6.1 True Zero-Copy Ingestion via Arrow C Data Interface
+The system SHOULD support a “true zero-copy” ingestion path across the Python↔Rust boundary using the Arrow C Data Interface:
+
+- **Input type**: `ArrowArrayStream` (RecordBatch stream) exported from Python (e.g., `pyarrow.RecordBatchReader`, Polars Arrow export).
+- **Rust consumption**: Iterate SoA (columnar) arrays directly to avoid materializing a full `Vec<Tick>`.
+- **Schema**: Must validate required columns and aliases (see 6.2). Missing optional columns must be derived deterministically (e.g., `ts_local = ts_exchange + Δfeed` when absent).
+- **Ordering requirement**: Each input stream MUST be sorted by (`ts_exchange`, `seq`) ascending. The engine MAY reject unsorted input rather than sorting internally.
+
+#### 6.6.2 Streaming Tick Sources + Lazy Event Scheduling
+To reduce startup time and memory footprint for very large datasets, the engine SHOULD support streaming “tick sources”:
+
+- A `TickSource` abstraction yields the *next* market-truth tick per stream without pre-loading all ticks/events.
+- The global event loop maintains determinism by:
+  - Scheduling only the next tick (truth) + next delivery per stream, then advancing that stream when consumed.
+  - Using stable tie-breakers (global `EventId` / `seq`) for events sharing the same `ts_sim`.
+- **Goal**: Memory overhead becomes \(O(\#streams)\) for tick scheduling rather than \(O(\#ticks)\).
+
+#### 6.6.3 Zero-Copy Result Export (Trades / Equity Curve / Stats)
+For large result sets, the system SHOULD expose results back to Python without building large Python lists/dicts:
+
+- **Trades**: Provide an Arrow/Polars representation (`RecordBatch` / `DataFrame`) backed by Rust-owned Arrow buffers.
+- **Equity curve**: Export a time-ordered series (timestamp + equity) as Arrow/Polars.
+- **Stats**: Small structs can remain as a Python object, but must not require float-based decisions inside the engine.
+
+#### 6.6.4 Bounded Trade Log Retention Policies
+To support long-duration, high-frequency backtests, trade logging SHOULD be configurable:
+
+- `TradeLogMode::All`: keep all fills/events (current behavior for correctness/debuggability).
+- `TradeLogMode::RingBuffer(N)`: keep only the last N events (bounded memory).
+- `TradeLogMode::SummaryOnly`: do not store per-trade rows; compute aggregate stats incrementally.
+- `TradeLogMode::None`: disable trade logging entirely (maximum throughput).
+
+When `SummaryOnly` is enabled, statistics MUST be computed deterministically and should match post-hoc computation for the same input (within defined tolerances for floating output fields).
+
+#### 6.6.5 Parallel Parameter Sweeps (Deterministic)
+The system SHOULD support running multiple independent backtests in parallel for parameter searches:
+
+- Each run must remain reproducible under fixed inputs and seed.
+- Seed derivation MUST be deterministic (e.g., `seed_run = hash64(base_seed, run_index)`).
+- Output ordering MUST be stable (results returned in the same order as the input configurations).
+
+#### 6.6.6 Performance Regression Observability
+CI SHOULD publish benchmark results as artifacts (and optionally post summaries on PRs) to detect regressions early:
+
+- Criterion reports uploaded per run.
+- Optional scheduled runs (e.g., weekly) for baseline tracking.
+- Avoid hard gating on noisy microbenchmarks unless a robust methodology is established.
+
 ## 7. Testing Requirements
 
 ### 7.1 Unit Tests
@@ -505,6 +556,10 @@ fn bench_python_callback_batch(c: &mut Criterion) { ... }
 - [ ] Documentation & examples
 
 ### Phase 5: Extensions (Future)
+- [ ] True zero-copy Arrow ingestion (C Data Interface) + streaming tick sources
+- [ ] Zero-copy result export (trades/equity curve) back to Python
+- [ ] Trade log retention policies (ring buffer / summary-only / none)
+- [ ] Parallel parameter sweep runner (deterministic)
 - [ ] MEV simulation hooks (for DeFi research)
 - [ ] Interpolated latency from pcap
 - [ ] Reg NMS / SIP simulation
