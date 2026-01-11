@@ -3,10 +3,10 @@
 use std::collections::BTreeMap;
 
 use backtester_core::engine::{EngineConfig, EngineMode, Strategy as CoreStrategy};
-use backtester_core::exchange_simulator::ExchangeSimulator;
 use backtester_core::latency_model::ConstantLatency;
 use backtester_core::queue_model::ConservativeQueue;
 use backtester_core::types::{Order, OrderReport, OrderType, Side, Tick};
+use backtester_core::{BacktestStats, TradeFill};
 use backtester_core::{Context as CoreContext, Engine, EventKind};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule};
@@ -18,6 +18,27 @@ pub struct Backtester {
     python_mode: String,
     batch_ms: i64,
     feed_latency_ns: i64,
+}
+
+#[pyclass]
+pub struct BacktestResult {
+    trades: Vec<TradeFill>,
+    stats: BacktestStats,
+}
+
+#[pymethods]
+impl BacktestResult {
+    pub fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        backtest_stats_to_pydict(py, &self.stats)
+    }
+
+    pub fn trades<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let out = PyList::empty_bound(py);
+        for t in &self.trades {
+            out.append(trade_fill_to_pydict(py, t)?)?;
+        }
+        Ok(out)
+    }
 }
 
 #[pymethods]
@@ -57,7 +78,7 @@ impl Backtester {
     /// - `tick` is passed as a Python `dict` of primitive fields.
     /// - `ctx` is currently `None` (order submission plumbing is added in later tasks).
     #[pyo3(signature = (strategy))]
-    pub fn run(&self, py: Python<'_>, strategy: Py<PyAny>) -> PyResult<()> {
+    pub fn run(&self, py: Python<'_>, strategy: Py<PyAny>) -> PyResult<BacktestResult> {
         let config = EngineConfig {
             feed_latency_ns: self.feed_latency_ns,
             order_update_latency_ns: self.feed_latency_ns,
@@ -69,18 +90,20 @@ impl Backtester {
             seed: self.seed,
         };
 
-        let exchange = ExchangeSimulator::new(ConservativeQueue);
         let strat = PyStrategy { obj: strategy };
         let latency_model = ConstantLatency {
             feed_latency_ns: self.feed_latency_ns,
             order_latency_ns: 0,
         };
         let mut engine: Engine<ConservativeQueue, PyStrategy, ConstantLatency> =
-            Engine::new(exchange, strat, config, latency_model);
+            Engine::new(ConservativeQueue, strat, config, latency_model);
 
         schedule_ticks_from_python_polars(py, &self.data, self.feed_latency_ns, &mut engine)?;
         engine.run();
-        Ok(())
+
+        let trades = engine.trade_log().fills().to_vec();
+        let stats = engine.stats();
+        Ok(BacktestResult { trades, stats })
     }
 }
 
@@ -297,8 +320,10 @@ impl CoreStrategy for PyStrategy {
             )?;
 
             if strategy.hasattr("on_ticks")? {
-                let tick_dicts: Vec<Bound<'_, PyDict>> =
-                    ticks.iter().map(|t| tick_to_pydict(py, t)).collect::<PyResult<_>>()?;
+                let tick_dicts: Vec<Bound<'_, PyDict>> = ticks
+                    .iter()
+                    .map(|t| tick_to_pydict(py, t))
+                    .collect::<PyResult<_>>()?;
                 let ticks_list = PyList::new_bound(py, tick_dicts);
                 strategy.call_method1("on_ticks", (ticks_list, py_ctx.clone_ref(py)))?;
             } else {
@@ -330,8 +355,10 @@ impl CoreStrategy for PyStrategy {
             )?;
 
             if strategy.hasattr("on_order_updates")? {
-                let report_dicts: Vec<Bound<'_, PyDict>> =
-                    reports.iter().map(|r| order_report_to_pydict(py, r)).collect::<PyResult<_>>()?;
+                let report_dicts: Vec<Bound<'_, PyDict>> = reports
+                    .iter()
+                    .map(|r| order_report_to_pydict(py, r))
+                    .collect::<PyResult<_>>()?;
                 let reports_list = PyList::new_bound(py, report_dicts);
                 strategy.call_method1("on_order_updates", (reports_list, py_ctx.clone_ref(py)))?;
             } else {
@@ -398,10 +425,38 @@ fn tick_to_pydict<'py>(py: Python<'py>, tick: &Tick) -> PyResult<Bound<'py, PyDi
     Ok(d)
 }
 
-fn order_report_to_pydict<'py>(
+fn trade_fill_to_pydict<'py>(py: Python<'py>, t: &TradeFill) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new_bound(py);
+    d.set_item("ts_exchange", t.ts_exchange)?;
+    d.set_item("symbol_id", t.symbol_id)?;
+    d.set_item("order_id", t.order_id)?;
+    d.set_item("side", t.side.as_i8())?;
+    d.set_item("price", t.price)?;
+    d.set_item("qty", t.qty)?;
+    Ok(d)
+}
+
+fn backtest_stats_to_pydict<'py>(
     py: Python<'py>,
-    r: &OrderReport,
+    s: &BacktestStats,
 ) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new_bound(py);
+    d.set_item("total_trades", s.total_trades)?;
+    d.set_item("win_rate", s.win_rate)?;
+    d.set_item("profit_factor", s.profit_factor)?;
+    d.set_item("sharpe_ratio", s.sharpe_ratio)?;
+    d.set_item("sortino_ratio", s.sortino_ratio)?;
+    d.set_item("max_drawdown", s.max_drawdown)?;
+    d.set_item("max_drawdown_duration", s.max_drawdown_duration)?;
+    d.set_item("calmar_ratio", s.calmar_ratio)?;
+    d.set_item("total_pnl", s.total_pnl)?;
+    d.set_item("avg_trade_pnl", s.avg_trade_pnl)?;
+    d.set_item("avg_holding_period", s.avg_holding_period)?;
+    d.set_item("total_fees_paid", s.total_fees_paid)?;
+    Ok(d)
+}
+
+fn order_report_to_pydict<'py>(py: Python<'py>, r: &OrderReport) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new_bound(py);
     d.set_item("order_id", r.order_id)?;
     d.set_item("symbol_id", r.symbol_id)?;
@@ -559,6 +614,7 @@ fn schedule_ticks_from_python_polars(
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<Backtester>()?;
+    m.add_class::<BacktestResult>()?;
     m.add_function(wrap_pyfunction!(call_strategy_on_ticks, m)?)?;
     Ok(())
 }
