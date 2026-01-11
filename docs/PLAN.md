@@ -136,14 +136,14 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
         - `test_queue_conservative_user_is_last_in_queue()`
 
 ### 1.3 Event Loop
-- [ ] **1.3.1 Global Event Queue (`ts_sim`)** `[Depends on 1.1.3]`
+- [x] **1.3.1 Global Event Queue (`ts_sim`)** `[Depends on 1.1.3]`
     - Implement a `BinaryHeap`-based event queue ordered by `ts_sim` with deterministic tie-breakers.
     - Event variants SHOULD cover: market data updates (truth), feed deliveries (strategy view), order arrivals/ACKs, order-update deliveries, funding, timers.
     - **Deliverable**: Mechanism to push multiple streams and pop events in deterministic temporal order.
     - **Suggested tests**:
         - `test_global_event_queue_orders_by_ts_sim_then_tiebreak()`
 
-- [ ] **1.3.2 Basic Event Loop** `[Depends on 1.3.1]`
+- [x] **1.3.2 Basic Event Loop** `[Depends on 1.3.1]`
     - Create `Engine` struct.
     - Implement `run()` loop processing events one by one.
     - Dispatch events to `ExchangeSimulator` (market truth) and `Strategy` (feed-delayed view).
@@ -151,7 +151,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Suggested tests**:
         - `test_engine_run_smoke_deterministic_sequence()`
 
-- [ ] **1.3.3 MarketView & Look-ahead Prevention** `[Depends on 1.3.2]`
+- [x] **1.3.3 MarketView & Look-ahead Prevention** `[Depends on 1.3.2]`
     - Implement a feed-delayed `MarketView` that the strategy reads (consistent with `ts_local`).
     - Ensure the matching engine uses ground-truth updates at `ts_exchange`, while strategy only sees delivered updates at `ts_local`.
     - **Deliverable**: Unit/integration test that fails if the strategy can observe future (`ts_exchange`) information early.
@@ -164,14 +164,14 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
 **Goal**: Expose the Rust core to Python via PyO3 and enable Polars data ingestion.
 
 ### 2.1 PyO3 Bindings
-- [ ] **2.1.1 Setup Maturin** `[Depends on 1.1.1]`
+- [x] **2.1.1 Setup Maturin** `[Depends on 1.1.1]`
     - Configure `pyproject.toml`.
     - Create basic `#[pyclass]` for `Backtester`.
     - **Deliverable**: `maturin develop` installs the package in a python venv.
     - **Suggested tests**:
         - `test_e2e_import_and_run_smoke()`
 
-- [ ] **2.1.2 Strategy Interface (FFI)** `[Depends on 2.1.1]`
+- [x] **2.1.2 Strategy Interface (FFI)** `[Depends on 2.1.1]`
     - Define `Strategy` trait in Rust.
     - Implement Python wrapper struct that holds a `PyObject` (the Python strategy instance).
     - Support both modes:
@@ -184,7 +184,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
         - `test_e2e_strategy_batch_mode_smoke()`
 
 ### 2.2 Data Ingestion
-- [ ] **2.2.1 Polars / Arrow Conversion** `[Depends on 1.1.1]`
+- [x] **2.2.1 Polars / Arrow Conversion** `[Depends on 1.1.1]`
     - Use `pyo3-polars` to accept Polars data (DataFrame/LazyFrame materialization strategy TBD).
     - Validate schema and aliases per SPEC (`ts_exchange`/`ts_event`, `qty`/`size`, optional `seq`, optional `ts_local`).
     - Implement columnar iteration over Arrow arrays (SoA) and avoid materializing a full `Vec<Tick>` for large datasets.
@@ -193,7 +193,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
         - `test_schema_accepts_ts_event_alias()`
         - `test_schema_accepts_qty_size_alias()`
 
-- [ ] **2.2.2 Batch Processing** `[Depends on 2.2.1]`
+- [x] **2.2.2 Batch Processing** `[Depends on 2.2.1]`
     - Buffer delivered ticks and wake Python on configurable conditions (max batch duration, any order update delivery, funding/timer).
     - Ensure batch wakeups preserve determinism with stable ordering.
     - **Deliverable**: Benchmarks showing > 1M ticks/sec throughput with batch mode enabled.

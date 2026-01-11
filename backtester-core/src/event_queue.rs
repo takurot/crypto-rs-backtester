@@ -49,6 +49,10 @@ impl EventQueue {
         self.heap.is_empty()
     }
 
+    pub fn peek(&self) -> Option<&Event> {
+        self.heap.peek().map(|qe| &qe.0)
+    }
+
     pub fn push(&mut self, event: Event) {
         self.heap.push(QueuedEvent(event));
     }
@@ -63,6 +67,29 @@ mod tests {
     use super::*;
     use crate::event::EventKind;
     use crate::fixtures;
+
+    #[test]
+    fn test_global_event_queue_orders_by_ts_sim_then_tiebreak() {
+        let mut q = EventQueue::new();
+
+        // Mix timestamps and seq values; ordering must be by (ts_sim asc, seq asc).
+        q.push(fixtures::event_tick(2_000, 0, fixtures::tick_trade(2_000, 2_000, 0)));
+        q.push(fixtures::event_tick(1_000, 2, fixtures::tick_trade(1_000, 1_000, 2)));
+        q.push(fixtures::event_tick(1_000, 1, fixtures::tick_trade(1_000, 1_000, 1)));
+        q.push(fixtures::event_tick(3_000, 0, fixtures::tick_trade(3_000, 3_000, 0)));
+
+        let popped: Vec<(i64, u64)> = (0..4)
+            .map(|_| {
+                let e = q.pop().expect("event");
+                (e.ts_sim(), e.seq())
+            })
+            .collect();
+
+        assert_eq!(
+            popped,
+            vec![(1_000, 1), (1_000, 2), (2_000, 0), (3_000, 0)]
+        );
+    }
 
     #[test]
     fn test_event_queue_tiebreak_stable() {
