@@ -1,6 +1,6 @@
 ### crypt-rs-backtester
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/takurot/crypto-rs-backtester/blob/feature/colab-example/example/colab_backtester_demo.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/takurot/crypto-rs-backtester/blob/main/example/colab_backtester_demo.ipynb)
 
 **A research-friendly, tick-level, high-fidelity backtester powered by Rust and Python (Polars).** (WIP / Under Development)
 
