@@ -1,3 +1,4 @@
+pub mod engine;
 pub mod event;
 pub mod event_queue;
 pub mod exchange_simulator;
@@ -7,6 +8,7 @@ pub mod queue_model;
 pub mod rng;
 pub mod types;
 
+pub use engine::{Context, Engine, EngineConfig, EngineMode, MarketView, Strategy};
 pub use event::{Event, EventId, EventKind};
 pub use event_queue::EventQueue;
 pub use orderbook_l2::OrderBookL2;
