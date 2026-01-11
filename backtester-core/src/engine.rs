@@ -669,24 +669,35 @@ mod tests {
             seed: 42,
         };
         let strategy = RecordingStrategy::default();
-        let mut eng = Engine::new(ConservativeQueue, strategy, config, ConstantLatency {
-            feed_latency_ns: 0,
-            order_latency_ns: 0,
-        });
+        let mut eng = Engine::new(
+            ConservativeQueue,
+            strategy,
+            config,
+            ConstantLatency {
+                feed_latency_ns: 0,
+                order_latency_ns: 0,
+            },
+        );
 
         // 1. Submit order
         let t0 = fixtures::tick_trade(1_000, 1_000, 0);
         eng.push_event(1_000, EventKind::TickDelivery(t0));
         eng.step().expect("tick delivery");
         eng.step().expect("order arrival at exchange");
-        
+
         assert_eq!(eng.order_symbol_by_id.len(), 1);
         let order_id = 1;
-        assert!(eng.exchanges.get(&fixtures::SYMBOL_ID_BTC_USDT).unwrap().get_order(order_id).is_some());
+        assert!(
+            eng.exchanges
+                .get(&fixtures::SYMBOL_ID_BTC_USDT)
+                .unwrap()
+                .get_order(order_id)
+                .is_some()
+        );
 
         // 2. ACK order
         eng.step().expect("ack");
-        
+
         // 3. Fill order
         let t1 = Tick {
             ts_exchange: 2_000,
@@ -700,15 +711,21 @@ mod tests {
         };
         eng.push_event(2_000, EventKind::Tick(t1));
         eng.step().expect("tick truth");
-        
+
         // At this point OrderReport(Filled) is scheduled but not processed.
         assert_eq!(eng.order_symbol_by_id.len(), 1);
 
         // 4. Process OrderReport
         eng.step().expect("report");
-        
+
         // Cleanup should have happened.
         assert_eq!(eng.order_symbol_by_id.len(), 0);
-        assert!(eng.exchanges.get(&fixtures::SYMBOL_ID_BTC_USDT).unwrap().get_order(order_id).is_none());
+        assert!(
+            eng.exchanges
+                .get(&fixtures::SYMBOL_ID_BTC_USDT)
+                .unwrap()
+                .get_order(order_id)
+                .is_none()
+        );
     }
 }

@@ -116,7 +116,11 @@ pub fn pnl_deltas_from_fills(fills: &[TradeFill]) -> Vec<PnlDelta> {
     for f in fills {
         let qty = f.qty;
         if qty <= 0 {
-            deltas.push(PnlDelta { ts_exchange: f.ts_exchange, pnl: 0, holding_period: 0 });
+            deltas.push(PnlDelta {
+                ts_exchange: f.ts_exchange,
+                pnl: 0,
+                holding_period: 0,
+            });
             continue;
         }
 
@@ -126,7 +130,11 @@ pub fn pnl_deltas_from_fills(fills: &[TradeFill]) -> Vec<PnlDelta> {
             Side::None => 0,
         };
         if delta_qty == 0 {
-            deltas.push(PnlDelta { ts_exchange: f.ts_exchange, pnl: 0, holding_period: 0 });
+            deltas.push(PnlDelta {
+                ts_exchange: f.ts_exchange,
+                pnl: 0,
+                holding_period: 0,
+            });
             continue;
         }
 
@@ -148,7 +156,11 @@ pub fn pnl_deltas_from_fills(fills: &[TradeFill]) -> Vec<PnlDelta> {
                 s.avg_price = 0;
             }
             s.qty = new_qty;
-            deltas.push(PnlDelta { ts_exchange: f.ts_exchange, pnl: 0, holding_period: 0 });
+            deltas.push(PnlDelta {
+                ts_exchange: f.ts_exchange,
+                pnl: 0,
+                holding_period: 0,
+            });
             continue;
         }
 
@@ -186,7 +198,11 @@ pub fn pnl_deltas_from_fills(fills: &[TradeFill]) -> Vec<PnlDelta> {
             s.last_open_ts = f.ts_exchange;
         }
 
-        deltas.push(PnlDelta { ts_exchange: f.ts_exchange, pnl: pnl_delta_i64, holding_period });
+        deltas.push(PnlDelta {
+            ts_exchange: f.ts_exchange,
+            pnl: pnl_delta_i64,
+            holding_period,
+        });
     }
 
     deltas
@@ -264,11 +280,7 @@ pub fn sortino_ratio_from_pnl_series(pnl: &[i64]) -> f64 {
         .iter()
         .map(|&x| {
             let d = x as f64 - 0.0; // target return 0
-            if d < 0.0 {
-                d * d
-            } else {
-                0.0
-            }
+            if d < 0.0 { d * d } else { 0.0 }
         })
         .sum::<f64>()
         / (n as f64);
@@ -283,13 +295,14 @@ pub fn sortino_ratio_from_pnl_series(pnl: &[i64]) -> f64 {
 pub fn calculate_stats(trade_log: &TradeLog) -> BacktestStats {
     let fills = trade_log.fills();
     let pnl_events = trade_log.pnl_events();
-    
+
     let trade_deltas = pnl_deltas_from_fills(fills);
-    let mut all_pnl_deltas: Vec<(TsExchangeNs, i64)> = Vec::with_capacity(trade_deltas.len() + pnl_events.len());
-    
+    let mut all_pnl_deltas: Vec<(TsExchangeNs, i64)> =
+        Vec::with_capacity(trade_deltas.len() + pnl_events.len());
+
     let mut total_holding_time: i64 = 0;
     let mut num_closed_trades: u64 = 0;
-    
+
     for d in &trade_deltas {
         all_pnl_deltas.push((d.ts_exchange, d.pnl));
         if d.holding_period > 0 {
@@ -423,11 +436,20 @@ mod tests {
     fn test_stats_funding_pnl_timeseries() {
         let mut log = TradeLog::default();
         // 1. Gain 100 at t=10
-        log.push_pnl_event(PnlEvent { ts_exchange: 10, pnl: 100_00000000 });
+        log.push_pnl_event(PnlEvent {
+            ts_exchange: 10,
+            pnl: 100_00000000,
+        });
         // 2. Lose 20 (funding) at t=20 -> DD = 20%
-        log.push_pnl_event(PnlEvent { ts_exchange: 20, pnl: -20_00000000 });
+        log.push_pnl_event(PnlEvent {
+            ts_exchange: 20,
+            pnl: -20_00000000,
+        });
         // 3. Gain 50 at t=30 -> New peak 130
-        log.push_pnl_event(PnlEvent { ts_exchange: 30, pnl: 50_00000000 });
+        log.push_pnl_event(PnlEvent {
+            ts_exchange: 30,
+            pnl: 50_00000000,
+        });
 
         let stats = calculate_stats(&log);
         assert_eq!(stats.total_pnl, 130_00000000);
@@ -439,11 +461,39 @@ mod tests {
     fn test_stats_win_rate_and_profit_factor() {
         let mut log = TradeLog::default();
         // Trade 1: Buy 100, Sell 110 -> PnL +10
-        log.push_fill(TradeFill { ts_exchange: 10, symbol_id: 1, order_id: 1, side: Side::Buy, price: 100_00000000, qty: 1_00000000 });
-        log.push_fill(TradeFill { ts_exchange: 11, symbol_id: 1, order_id: 2, side: Side::Sell, price: 110_00000000, qty: 1_00000000 });
+        log.push_fill(TradeFill {
+            ts_exchange: 10,
+            symbol_id: 1,
+            order_id: 1,
+            side: Side::Buy,
+            price: 100_00000000,
+            qty: 1_00000000,
+        });
+        log.push_fill(TradeFill {
+            ts_exchange: 11,
+            symbol_id: 1,
+            order_id: 2,
+            side: Side::Sell,
+            price: 110_00000000,
+            qty: 1_00000000,
+        });
         // Trade 2: Buy 100, Sell 95 -> PnL -5
-        log.push_fill(TradeFill { ts_exchange: 20, symbol_id: 1, order_id: 3, side: Side::Buy, price: 100_00000000, qty: 1_00000000 });
-        log.push_fill(TradeFill { ts_exchange: 21, symbol_id: 1, order_id: 4, side: Side::Sell, price: 95_00000000, qty: 1_00000000 });
+        log.push_fill(TradeFill {
+            ts_exchange: 20,
+            symbol_id: 1,
+            order_id: 3,
+            side: Side::Buy,
+            price: 100_00000000,
+            qty: 1_00000000,
+        });
+        log.push_fill(TradeFill {
+            ts_exchange: 21,
+            symbol_id: 1,
+            order_id: 4,
+            side: Side::Sell,
+            price: 95_00000000,
+            qty: 1_00000000,
+        });
 
         let stats = calculate_stats(&log);
         assert_eq!(stats.total_trades, 4);
