@@ -15,11 +15,8 @@ fn bench_event_loop_1m_ticks(c: &mut Criterion) {
 
             let mut acc: i64 = 0;
             while let Some(ev) = q.pop() {
-                match ev.kind {
-                    EventKind::Tick(t) => {
-                        acc = acc.wrapping_add(t.price);
-                    }
-                    _ => {}
+                if let EventKind::Tick(t) = ev.kind {
+                    acc = acc.wrapping_add(t.price);
                 }
             }
             black_box(acc)

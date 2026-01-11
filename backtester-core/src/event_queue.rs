@@ -89,4 +89,29 @@ mod tests {
             other => panic!("expected Tick event, got: {other:?}"),
         }
     }
+
+    #[test]
+    fn test_event_ordering_same_ts_sim_uses_stable_tiebreak() {
+        let ts_sim = 42;
+
+        let mut q = EventQueue::new();
+        q.push(fixtures::event_tick(
+            ts_sim,
+            2,
+            fixtures::tick_trade(ts_sim, ts_sim, 2),
+        ));
+        q.push(fixtures::event_tick(
+            ts_sim,
+            0,
+            fixtures::tick_trade(ts_sim, ts_sim, 0),
+        ));
+        q.push(fixtures::event_tick(
+            ts_sim,
+            1,
+            fixtures::tick_trade(ts_sim, ts_sim, 1),
+        ));
+
+        let popped: Vec<u64> = (0..3).map(|_| q.pop().expect("event").seq()).collect();
+        assert_eq!(popped, vec![0, 1, 2]);
+    }
 }

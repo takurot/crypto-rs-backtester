@@ -30,6 +30,14 @@ impl OrderBookL2 {
         }
     }
 
+    pub fn level_qty(&self, side: Side, price: i64) -> i64 {
+        match side {
+            Side::Buy => *self.bids.get(&price).unwrap_or(&0),
+            Side::Sell => *self.asks.get(&price).unwrap_or(&0),
+            Side::None => 0,
+        }
+    }
+
     pub fn best_bid(&self) -> Option<(i64, i64)> {
         self.bids.iter().next_back().map(|(p, q)| (*p, *q))
     }

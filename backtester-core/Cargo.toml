@@ -5,6 +5,12 @@ edition = "2024"
 
 [dependencies]
 rand = { version = "0.8", features = ["small_rng"] }
+thiserror = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+log = { version = "0.4", optional = true }
+rust_decimal = { version = "1", optional = true }
+arrow = { version = "54", optional = true }
+polars = { version = "0.40", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
