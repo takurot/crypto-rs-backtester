@@ -1,0 +1,11 @@
+[package]
+name = "backtester-py"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+backtester-core = { path = "../backtester-core" }
+pyo3 = { version = "0.22", features = ["extension-module"] }

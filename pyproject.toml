@@ -1,0 +1,34 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "rust-backtester"
+version = "0.1.0"
+description = "Rust-based tick-level backtester (WIP)"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "maturin>=1.5,<2.0",
+    "pytest>=8.0",
+    "polars>=0.20",
+]
+bench = [
+    "pytest-benchmark>=4.0",
+]
+
+[tool.maturin]
+bindings = "pyo3"
+manifest-path = "backtester-py/Cargo.toml"
+python-source = "python"
+module-name = "rust_backtester._core"
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+markers = [
+    "bench: optional benchmark-style tests (not strict performance gates)",
+]
+

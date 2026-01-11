@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "backtester-core",
+    "backtester-py",
+]
+default-members = [
+    "backtester-core",
+]
+resolver = "2"
+
