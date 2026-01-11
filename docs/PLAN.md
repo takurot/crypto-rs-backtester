@@ -202,21 +202,21 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
         - `test_batch_wakeup_on_order_update_delivery()`
 
 ### 2.3 End-to-End (E2E) Tests (Python)
-- [ ] **2.3.1 Deterministic E2E Run** `[Depends on 2.1.2, 2.2.2]`
+- [x] **2.3.1 Deterministic E2E Run** `[Depends on 2.1.2, 2.2.2]`
     - E2E test: run the same backtest twice with the same seed and assert identical outputs (trades + stats).
     - **Deliverable**: `pytest` E2E suite validates reproducibility.
     - **Suggested tests**:
         - `test_e2e_reproducible_seed()`
     - **Data**: Use `make_minimal_ticks_lazyframe()` (above) to generate the input on-the-fly.
 
-- [ ] **2.3.2 Tick vs Batch Equivalence (Sanity)** `[Depends on 2.3.1]`
+- [x] **2.3.2 Tick vs Batch Equivalence (Sanity)** `[Depends on 2.3.1]`
     - E2E test: for a simple deterministic strategy, compare tick mode vs batch mode outputs (allowing expected minor differences only if explicitly documented).
     - **Deliverable**: Confidence that batch mode does not change semantics.
     - **Suggested tests**:
         - `test_e2e_tick_vs_batch_equivalence()`
     - **Data**: Use `make_minimal_ticks_lazyframe(with_seq=True)` to avoid ambiguous same-timestamp ordering.
 
-- [ ] **2.3.3 Look-ahead Bias Guard (E2E)** `[Depends on 1.3.3, 2.3.1]`
+- [x] **2.3.3 Look-ahead Bias Guard (E2E)** `[Depends on 1.3.3, 2.3.1]`
     - E2E test: set non-zero feed latency and assert the strategy cannot act on market moves before `ts_local`.
     - **Deliverable**: Regression guard preventing accidental “fast view” exposure in Python API.
     - **Suggested tests**:
@@ -231,7 +231,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
 **Goal**: Increase simulation fidelity with latency jitter and advanced queue models.
 
 ### 3.1 Latency Models
-- [ ] **3.1.1 Latency Trait & Jitter** `[Depends on 1.3.2]`
+- [x] **3.1.1 Latency Trait & Jitter** `[Depends on 1.3.2]`
     - Implement `LatencyModel` trait.
     - Implement `LogNormalJitter` using `rand` and `statrs` (or similar).
     - Ensure RNG is owned/seeded by the engine for reproducibility (models MUST NOT keep RNG state internally).
@@ -240,7 +240,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Suggested tests**:
         - `test_latency_lognormal_is_reproducible_under_seed()`
 
-- [ ] **3.2 Order State Race Conditions** `[Depends on 3.1.1]`
+- [x] **3.2 Order State Race Conditions** `[Depends on 3.1.1]`
     - verify `PendingCancel` logic.
     - Create test case: Send Cancel -> Market moves -> Order Fills -> Cancel Rejected.
     - **Deliverable**: Validated robust state machine.
@@ -248,7 +248,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
         - `test_pending_cancel_can_fill_before_cancel_ack()`
 
 ### 3.2 Advanced Queues
-- [ ] **3.2.1 Volume Clock Queue** `[Depends on 1.2.3]`
+- [x] **3.2.1 Volume Clock Queue** `[Depends on 1.2.3]`
     - Implement `VolumeClockQueue` model.
     - Logic: Track cumulative volume since order entry. Fill when `vol >= queue_pos`.
     - **Deliverable**: More realistic fill rates on L2 data compared to Conservative model.
@@ -256,7 +256,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
         - `test_queue_volume_clock_fills_when_cum_volume_exceeds_queue_pos()`
 
 ### 3.3 Crypto Specifics
-- [ ] **3.3.1 Funding Rate Simulation** `[Depends on 1.3.2]`
+- [x] **3.3.1 Funding Rate Simulation** `[Depends on 1.3.2]`
     - Add `FundingEvent` to data types.
     - Implement periodic funding payment logic in `Account` struct.
     - **Deliverable**: Positions incur funding costs/gains.

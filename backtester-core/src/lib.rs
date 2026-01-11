@@ -1,16 +1,20 @@
+pub mod account;
 pub mod engine;
 pub mod event;
 pub mod event_queue;
 pub mod exchange_simulator;
 pub mod fixtures;
+pub mod latency_model;
 pub mod orderbook_l2;
 pub mod queue_model;
 pub mod rng;
 pub mod types;
 
+pub use account::{Account, Position};
 pub use engine::{Context, Engine, EngineConfig, EngineMode, MarketView, Strategy};
 pub use event::{Event, EventId, EventKind};
 pub use event_queue::EventQueue;
+pub use latency_model::{ConstantLatency, LatencyModel, LogNormalJitter};
 pub use orderbook_l2::OrderBookL2;
 pub use rng::make_small_rng;
 pub use types::{
