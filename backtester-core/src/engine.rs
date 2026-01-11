@@ -193,7 +193,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
     }
 
     pub fn stats(&self) -> BacktestStats {
-        calculate_stats(&self.trade_log, self.account.total_funding_pnl())
+        calculate_stats(&self.trade_log)
     }
 
     fn exchange_mut(&mut self, symbol_id: u32) -> &mut ExchangeSimulator<Q> {
@@ -338,24 +338,37 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                     self.push_event(ts_delivery, EventKind::OrderReport(report));
                 }
             }
-            EventKind::OrderReport(report) => match self.config.mode {
-                EngineMode::Tick => {
-                    let mut ctx = Context::new(self.now_ts_sim, &self.market);
-                    self.strategy.on_order_update(&report, &mut ctx);
-                    self.handle_commands(ctx.into_commands(), self.now_ts_sim);
+            EventKind::OrderReport(report) => {
+                if report.status.is_terminal() {
+                    if let Some(&symbol_id) = self.order_symbol_by_id.get(&report.order_id) {
+                        self.exchange_mut(symbol_id).remove_order(report.order_id);
+                    }
+                    self.order_symbol_by_id.remove(&report.order_id);
                 }
-                EngineMode::Batch => {
-                    self.report_buffer.push(report);
-                    wakeup_requested = true;
+
+                match self.config.mode {
+                    EngineMode::Tick => {
+                        let mut ctx = Context::new(self.now_ts_sim, &self.market);
+                        self.strategy.on_order_update(&report, &mut ctx);
+                        self.handle_commands(ctx.into_commands(), self.now_ts_sim);
+                    }
+                    EngineMode::Batch => {
+                        self.report_buffer.push(report);
+                        wakeup_requested = true;
+                    }
                 }
-            },
+            }
             EventKind::Funding(event) => {
                 let mark_price = self
                     .truth_last_trade_by_symbol
                     .get(&event.symbol_id)
                     .map(|t| t.price)
                     .unwrap_or(0);
-                let _ = self.account.apply_funding(&event, mark_price);
+                let pnl = self.account.apply_funding(&event, mark_price);
+                self.trade_log.push_pnl_event(crate::stats::PnlEvent {
+                    ts_exchange: event.ts_exchange,
+                    pnl,
+                });
 
                 match self.config.mode {
                     EngineMode::Tick => {
@@ -644,5 +657,58 @@ mod tests {
 
         // Notional=100.00, rate=0.0001 => pay 0.01
         assert_eq!(eng.account().total_funding_pnl(), -1_000_000);
+    }
+
+    #[test]
+    fn test_engine_order_lifecycle_cleanup() {
+        let config = EngineConfig {
+            feed_latency_ns: 0,
+            order_update_latency_ns: 0,
+            mode: EngineMode::Tick,
+            max_batch_ns: 0,
+            seed: 42,
+        };
+        let strategy = RecordingStrategy::default();
+        let mut eng = Engine::new(ConservativeQueue, strategy, config, ConstantLatency {
+            feed_latency_ns: 0,
+            order_latency_ns: 0,
+        });
+
+        // 1. Submit order
+        let t0 = fixtures::tick_trade(1_000, 1_000, 0);
+        eng.push_event(1_000, EventKind::TickDelivery(t0));
+        eng.step().expect("tick delivery");
+        eng.step().expect("order arrival at exchange");
+        
+        assert_eq!(eng.order_symbol_by_id.len(), 1);
+        let order_id = 1;
+        assert!(eng.exchanges.get(&fixtures::SYMBOL_ID_BTC_USDT).unwrap().get_order(order_id).is_some());
+
+        // 2. ACK order
+        eng.step().expect("ack");
+        
+        // 3. Fill order
+        let t1 = Tick {
+            ts_exchange: 2_000,
+            ts_local: 2_000,
+            seq: 1,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            price: 100_00000000,
+            qty: 1_00000000,
+            side: Side::Sell,
+            flags: 0x01,
+        };
+        eng.push_event(2_000, EventKind::Tick(t1));
+        eng.step().expect("tick truth");
+        
+        // At this point OrderReport(Filled) is scheduled but not processed.
+        assert_eq!(eng.order_symbol_by_id.len(), 1);
+
+        // 4. Process OrderReport
+        eng.step().expect("report");
+        
+        // Cleanup should have happened.
+        assert_eq!(eng.order_symbol_by_id.len(), 0);
+        assert!(eng.exchanges.get(&fixtures::SYMBOL_ID_BTC_USDT).unwrap().get_order(order_id).is_none());
     }
 }

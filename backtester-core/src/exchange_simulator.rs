@@ -122,6 +122,11 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
         self.orders.get(&order_id).map(|o| o.remaining_qty)
     }
 
+    /// Remove an order from the active set (typically called when terminal).
+    pub fn remove_order(&mut self, order_id: u64) {
+        self.orders.remove(&order_id);
+    }
+
     /// Process a market trade tick and generate order reports for any fills.
     pub fn on_trade(&mut self, trade: Tick) -> Vec<OrderReport> {
         let mut reports = Vec::new();
