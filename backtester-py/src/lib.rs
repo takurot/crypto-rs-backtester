@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use backtester_core::engine::{EngineConfig, EngineMode, Strategy as CoreStrategy};
 use backtester_core::exchange_simulator::ExchangeSimulator;
+use backtester_core::latency_model::ConstantLatency;
 use backtester_core::queue_model::ConservativeQueue;
 use backtester_core::types::{Order, OrderReport, OrderType, Side, Tick};
 use backtester_core::{Context as CoreContext, Engine, EventKind};
@@ -65,11 +66,17 @@ impl Backtester {
                 _ => EngineMode::Tick,
             },
             max_batch_ns: self.batch_ms.saturating_mul(1_000_000),
+            seed: self.seed,
         };
 
         let exchange = ExchangeSimulator::new(ConservativeQueue);
         let strat = PyStrategy { obj: strategy };
-        let mut engine: Engine<ConservativeQueue, PyStrategy> = Engine::new(exchange, strat, config);
+        let latency_model = ConstantLatency {
+            feed_latency_ns: self.feed_latency_ns,
+            order_latency_ns: 0,
+        };
+        let mut engine: Engine<ConservativeQueue, PyStrategy, ConstantLatency> =
+            Engine::new(exchange, strat, config, latency_model);
 
         schedule_ticks_from_python_polars(py, &self.data, self.feed_latency_ns, &mut engine)?;
         engine.run();
@@ -411,7 +418,7 @@ fn schedule_ticks_from_python_polars(
     py: Python<'_>,
     data: &Py<PyAny>,
     feed_latency_ns: i64,
-    engine: &mut Engine<ConservativeQueue, PyStrategy>,
+    engine: &mut Engine<ConservativeQueue, PyStrategy, ConstantLatency>,
 ) -> PyResult<()> {
     let data_any = data.bind(py);
     let data_dict = data_any.downcast::<PyDict>()?;

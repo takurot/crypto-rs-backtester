@@ -83,8 +83,38 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
         Ok(())
     }
 
+    /// Exchange ACK for cancel:
+    /// - `PendingCancel` -> `Cancelled`
+    ///
+    /// If the order filled during the cancel flight, this returns an error to model
+    /// a "cancel rejected" outcome (Phase 3.2).
+    pub fn ack_cancel(&mut self, order_id: u64) -> Result<OrderReport, &'static str> {
+        let o = self.orders.get_mut(&order_id).ok_or("unknown order_id")?;
+        match o.state {
+            OrderState::PendingCancel => {
+                o.state = OrderState::Cancelled;
+                Ok(OrderReport {
+                    order_id: o.order.order_id,
+                    symbol_id: o.order.symbol_id,
+                    status: OrderState::Cancelled,
+                    last_fill_qty: 0,
+                    last_fill_price: 0,
+                    filled_qty: o.filled_qty,
+                    remaining_qty: o.remaining_qty,
+                    reason: None,
+                })
+            }
+            OrderState::Filled => Err("cancel rejected: already filled"),
+            _ => Err("order is not PendingCancel"),
+        }
+    }
+
     pub fn get_order_state(&self, order_id: u64) -> Option<OrderState> {
         self.orders.get(&order_id).map(|o| o.state)
+    }
+
+    pub fn get_order(&self, order_id: u64) -> Option<Order> {
+        self.orders.get(&order_id).map(|o| o.order)
     }
 
     pub fn get_filled_qty(&self, order_id: u64) -> Option<i64> {
@@ -257,6 +287,50 @@ mod tests {
         assert_eq!(r3[0].last_fill_qty, 2);
         assert_eq!(r3[0].filled_qty, 3);
         assert_eq!(r3[0].remaining_qty, 0);
+        assert_eq!(ex.get_order_state(id), Some(OrderState::Filled));
+    }
+
+    #[test]
+    fn test_pending_cancel_can_fill_before_cancel_ack() {
+        let mut ex = ExchangeSimulator::new(ConservativeQueue);
+
+        let order = Order {
+            order_id: 0,
+            ts_submit: 1_000,
+            seq: 0,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            price: 100,
+            qty: 1,
+        };
+        let id = ex.submit_order(order);
+        ex.ack_new(id).expect("ack");
+
+        ex.cancel_order(id).expect("cancel");
+        assert_eq!(ex.get_order_state(id), Some(OrderState::PendingCancel));
+
+        // The order can still fill while cancel is in-flight.
+        let trade = Tick {
+            ts_exchange: 2_000,
+            ts_local: 2_000,
+            seq: 1,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            price: 100,
+            qty: 1,
+            side: Side::Sell,
+            flags: 0x01,
+        };
+        let reports = ex.on_trade(trade);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].status, OrderState::Filled);
+        assert_eq!(ex.get_order_state(id), Some(OrderState::Filled));
+
+        // Then the cancel is rejected.
+        assert_eq!(
+            ex.ack_cancel(id).unwrap_err(),
+            "cancel rejected: already filled"
+        );
         assert_eq!(ex.get_order_state(id), Some(OrderState::Filled));
     }
 }

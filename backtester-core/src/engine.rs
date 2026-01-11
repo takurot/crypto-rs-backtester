@@ -1,10 +1,14 @@
 use std::collections::BTreeMap;
 
+use crate::account::Account;
 use crate::event::{Event, EventId, EventKind};
 use crate::event_queue::EventQueue;
 use crate::exchange_simulator::ExchangeSimulator;
+use crate::latency_model::LatencyModel;
 use crate::queue_model::QueueModel;
+use crate::rng::make_small_rng;
 use crate::types::{FundingEvent, Order, OrderReport, Tick, TsLocalNs, TsSimNs};
+use rand::rngs::SmallRng;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineMode {
@@ -22,6 +26,8 @@ pub struct EngineConfig {
     pub mode: EngineMode,
     /// Maximum batch duration in nanoseconds (Batch mode only).
     pub max_batch_ns: i64,
+    /// RNG seed for all stochastic components owned by the engine.
+    pub seed: u64,
 }
 
 impl Default for EngineConfig {
@@ -31,6 +37,7 @@ impl Default for EngineConfig {
             order_update_latency_ns: 0,
             mode: EngineMode::Tick,
             max_batch_ns: 0,
+            seed: 0,
         }
     }
 }
@@ -117,12 +124,16 @@ impl<'a> Context<'a> {
 
 /// Discrete-event simulation engine.
 #[derive(Debug)]
-pub struct Engine<Q: QueueModel, S: Strategy> {
+pub struct Engine<Q: QueueModel, S: Strategy, L: LatencyModel> {
     config: EngineConfig,
     queue: EventQueue,
     exchange: ExchangeSimulator<Q>,
     strategy: S,
+    latency_model: L,
+    rng: SmallRng,
+    account: Account,
     market: MarketView,
+    truth_last_trade_by_symbol: BTreeMap<u32, Tick>,
     next_event_seq: u64,
     now_ts_sim: TsSimNs,
     // Batch-mode buffering (Phase 2).
@@ -132,14 +143,23 @@ pub struct Engine<Q: QueueModel, S: Strategy> {
     next_timer_id: u64,
 }
 
-impl<Q: QueueModel, S: Strategy> Engine<Q, S> {
-    pub fn new(exchange: ExchangeSimulator<Q>, strategy: S, config: EngineConfig) -> Self {
+impl<Q: QueueModel, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
+    pub fn new(
+        exchange: ExchangeSimulator<Q>,
+        strategy: S,
+        config: EngineConfig,
+        latency_model: L,
+    ) -> Self {
         Self {
             config,
             queue: EventQueue::new(),
             exchange,
             strategy,
+            latency_model,
+            rng: make_small_rng(config.seed),
+            account: Account::default(),
             market: MarketView::default(),
+            truth_last_trade_by_symbol: BTreeMap::new(),
             next_event_seq: 0,
             now_ts_sim: 0,
             tick_buffer: Vec::new(),
@@ -151,6 +171,10 @@ impl<Q: QueueModel, S: Strategy> Engine<Q, S> {
 
     pub fn market_view(&self) -> &MarketView {
         &self.market
+    }
+
+    pub fn account(&self) -> &Account {
+        &self.account
     }
 
     pub fn push_event(&mut self, ts_sim: TsSimNs, kind: EventKind) {
@@ -185,9 +209,15 @@ impl<Q: QueueModel, S: Strategy> Engine<Q, S> {
         let mut wakeup_requested = false;
         match event.kind {
             EventKind::Tick(tick) => {
+                self.truth_last_trade_by_symbol.insert(tick.symbol_id, tick);
                 // Market truth drives the exchange simulator only.
                 let reports = self.exchange.on_trade(tick);
                 for r in reports {
+                    if r.last_fill_qty > 0 {
+                        if let Some(order) = self.exchange.get_order(r.order_id) {
+                            self.account.on_fill(&order, r.last_fill_qty);
+                        }
+                    }
                     let ts_delivery = tick.ts_exchange + self.config.order_update_latency_ns;
                     self.push_event(ts_delivery, EventKind::OrderReport(r));
                 }
@@ -221,16 +251,31 @@ impl<Q: QueueModel, S: Strategy> Engine<Q, S> {
             }
             EventKind::Order(order) => {
                 let order_id = self.exchange.submit_order(order);
-                let _ = self.exchange.ack_new(order_id);
+                let dt = self
+                    .latency_model
+                    .sample_order_latency(self.now_ts_sim, &mut self.rng)
+                    .max(0);
+                let ts_ack = self.now_ts_sim.saturating_add(dt);
+                self.push_event(ts_ack, EventKind::OrderAck { order_id });
             }
             EventKind::OrderAck { order_id } => {
                 let _ = self.exchange.ack_new(order_id);
             }
-            EventKind::OrderCancel { order_id: _ } => {
-                // Cancel path is implemented in later phases (latency + cancel ACK race).
+            EventKind::OrderCancel { order_id } => {
+                if self.exchange.cancel_order(order_id).is_ok() {
+                    let dt = self
+                        .latency_model
+                        .sample_order_latency(self.now_ts_sim, &mut self.rng)
+                        .max(0);
+                    let ts_ack = self.now_ts_sim.saturating_add(dt);
+                    self.push_event(ts_ack, EventKind::OrderCancelAck { order_id });
+                }
             }
-            EventKind::OrderCancelAck { order_id: _ } => {
-                // Cancel path is implemented in later phases (latency + cancel ACK race).
+            EventKind::OrderCancelAck { order_id } => {
+                if let Ok(report) = self.exchange.ack_cancel(order_id) {
+                    let ts_delivery = self.now_ts_sim + self.config.order_update_latency_ns;
+                    self.push_event(ts_delivery, EventKind::OrderReport(report));
+                }
             }
             EventKind::OrderReport(report) => {
                 match self.config.mode {
@@ -246,6 +291,13 @@ impl<Q: QueueModel, S: Strategy> Engine<Q, S> {
                 }
             }
             EventKind::Funding(event) => {
+                let mark_price = self
+                    .truth_last_trade_by_symbol
+                    .get(&event.symbol_id)
+                    .map(|t| t.price)
+                    .unwrap_or(0);
+                let _ = self.account.apply_funding(&event, mark_price);
+
                 match self.config.mode {
                     EngineMode::Tick => {
                         let mut ctx = Context::new(self.now_ts_sim, &self.market);
@@ -291,8 +343,8 @@ impl<Q: QueueModel, S: Strategy> Engine<Q, S> {
                     order.ts_submit = ts_local;
                     self.push_event(ts_local, EventKind::Order(order));
                 }
-                Command::CancelOrder { order_id: _ } => {
-                    // Not yet implemented.
+                Command::CancelOrder { order_id } => {
+                    self.push_event(ts_local, EventKind::OrderCancel { order_id });
                 }
             }
         }
@@ -328,6 +380,7 @@ mod tests {
 
     use crate::exchange_simulator::ExchangeSimulator;
     use crate::fixtures;
+    use crate::latency_model::ConstantLatency;
     use crate::queue_model::ConservativeQueue;
     use crate::types::{OrderState, OrderType, Side, Tick};
 
@@ -375,11 +428,16 @@ mod tests {
             order_update_latency_ns: 1_000, // deliver fills at the same latency as the feed
             mode: EngineMode::Tick,
             max_batch_ns: 0,
+            seed: 42,
         };
 
         let exchange = ExchangeSimulator::new(ConservativeQueue);
         let strategy = RecordingStrategy::default();
-        let mut eng = Engine::new(exchange, strategy, config);
+        let latency_model = ConstantLatency {
+            feed_latency_ns: config.feed_latency_ns,
+            order_latency_ns: 0,
+        };
+        let mut eng = Engine::new(exchange, strategy, config, latency_model);
 
         // Tick #0 (truth at ts_exchange=1_000, delivered at ts_local=2_000)
         let t0_truth = fixtures::tick_trade(1_000, 1_000, 0);
@@ -427,10 +485,15 @@ mod tests {
             order_update_latency_ns: 1_000,
             mode: EngineMode::Tick,
             max_batch_ns: 0,
+            seed: 42,
         };
         let exchange = ExchangeSimulator::new(ConservativeQueue);
         let strategy = NoopStrategy::default();
-        let mut eng = Engine::new(exchange, strategy, config);
+        let latency_model = ConstantLatency {
+            feed_latency_ns: config.feed_latency_ns,
+            order_latency_ns: 0,
+        };
+        let mut eng = Engine::new(exchange, strategy, config, latency_model);
 
         let t0_truth = fixtures::tick_trade(1_000, 1_000, 0);
         let t0_delivery = Tick {
@@ -453,6 +516,70 @@ mod tests {
             .expect("last trade");
         assert_eq!(last.ts_exchange, 1_000);
         assert_eq!(last.ts_local, 2_000);
+    }
+
+    #[test]
+    fn test_funding_applied_at_scheduled_ts_exchange() {
+        let config = EngineConfig {
+            feed_latency_ns: 0,
+            order_update_latency_ns: 0,
+            mode: EngineMode::Tick,
+            max_batch_ns: 0,
+            seed: 42,
+        };
+        let exchange = ExchangeSimulator::new(ConservativeQueue);
+        let strategy = RecordingStrategy::default();
+        let latency_model = ConstantLatency {
+            feed_latency_ns: config.feed_latency_ns,
+            order_latency_ns: 0,
+        };
+        let mut eng = Engine::new(exchange, strategy, config, latency_model);
+
+        // Tick #0: submit the order on delivery at ts=1_000.
+        let t0_truth = fixtures::tick_trade(1_000, 1_000, 0);
+        let t0_delivery = Tick {
+            ts_exchange: t0_truth.ts_exchange,
+            ts_local: t0_truth.ts_exchange,
+            ..t0_truth
+        };
+        eng.push_event(1_000, EventKind::Tick(t0_truth));
+        eng.push_event(1_000, EventKind::TickDelivery(t0_delivery));
+
+        // Tick #1: fills the buy order (against = sell).
+        let t1_truth = Tick {
+            ts_exchange: 2_000,
+            ts_local: 2_000,
+            seq: 1,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            price: 100_00000000,
+            qty: 1_00000000,
+            side: Side::Sell,
+            flags: 0x01,
+        };
+        eng.push_event(2_000, EventKind::Tick(t1_truth));
+
+        // Funding at 3_000 with rate=0.0001.
+        let f = FundingEvent {
+            ts_exchange: 3_000,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            rate: 10_000,
+        };
+        eng.push_event(3_000, EventKind::Funding(f));
+
+        // Before funding event is processed, funding PnL must be 0.
+        while let Some(ev) = eng.step() {
+            if ev.ts_sim() < 3_000 {
+                assert_eq!(eng.account().total_funding_pnl(), 0);
+                continue;
+            }
+            match ev.kind {
+                EventKind::Funding(_) => break,
+                _ => continue,
+            }
+        }
+
+        // Notional=100.00, rate=0.0001 => pay 0.01
+        assert_eq!(eng.account().total_funding_pnl(), -1_000_000);
     }
 }
 
