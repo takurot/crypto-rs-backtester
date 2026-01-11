@@ -14,9 +14,17 @@ pub struct TradeFill {
     pub qty: i64,
 }
 
+/// Arbitrary PnL event (e.g. funding payment).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PnlEvent {
+    pub ts_exchange: TsExchangeNs,
+    pub pnl: i64,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct TradeLog {
     fills: Vec<TradeFill>,
+    pnl_events: Vec<PnlEvent>,
 }
 
 impl TradeLog {
@@ -24,8 +32,16 @@ impl TradeLog {
         self.fills.push(fill);
     }
 
+    pub fn push_pnl_event(&mut self, event: PnlEvent) {
+        self.pnl_events.push(event);
+    }
+
     pub fn fills(&self) -> &[TradeFill] {
         &self.fills
+    }
+
+    pub fn pnl_events(&self) -> &[PnlEvent] {
+        &self.pnl_events
     }
 }
 
@@ -75,24 +91,32 @@ impl Default for BacktestStats {
 struct PosState {
     qty: i64,
     avg_price: i64,
+    last_open_ts: TsExchangeNs,
 }
 
 fn clamp_i128_to_i64(v: i128) -> i64 {
     v.clamp(i64::MIN as i128, i64::MAX as i128) as i64
 }
 
+/// Information about a realized PnL delta and its holding period.
+pub struct PnlDelta {
+    pub ts_exchange: TsExchangeNs,
+    pub pnl: i64,
+    pub holding_period: i64,
+}
+
 /// Return realized PnL deltas (quote, scaled) per fill using an average-cost model.
 ///
-/// Each entry is `(ts_exchange, pnl_delta)`, where `pnl_delta` is 0 for pure opens/adds,
+/// Each entry is `PnlDelta`, where `pnl` is 0 for pure opens/adds,
 /// and non-zero when the fill reduces or closes an existing position.
-pub fn pnl_deltas_from_fills(fills: &[TradeFill]) -> Vec<(TsExchangeNs, i64)> {
+pub fn pnl_deltas_from_fills(fills: &[TradeFill]) -> Vec<PnlDelta> {
     let mut state_by_symbol: BTreeMap<u32, PosState> = BTreeMap::new();
-    let mut deltas: Vec<(TsExchangeNs, i64)> = Vec::with_capacity(fills.len());
+    let mut deltas: Vec<PnlDelta> = Vec::with_capacity(fills.len());
 
     for f in fills {
         let qty = f.qty;
         if qty <= 0 {
-            deltas.push((f.ts_exchange, 0));
+            deltas.push(PnlDelta { ts_exchange: f.ts_exchange, pnl: 0, holding_period: 0 });
             continue;
         }
 
@@ -102,7 +126,7 @@ pub fn pnl_deltas_from_fills(fills: &[TradeFill]) -> Vec<(TsExchangeNs, i64)> {
             Side::None => 0,
         };
         if delta_qty == 0 {
-            deltas.push((f.ts_exchange, 0));
+            deltas.push(PnlDelta { ts_exchange: f.ts_exchange, pnl: 0, holding_period: 0 });
             continue;
         }
 
@@ -110,6 +134,9 @@ pub fn pnl_deltas_from_fills(fills: &[TradeFill]) -> Vec<(TsExchangeNs, i64)> {
 
         // Open / add to position in the same direction.
         if s.qty == 0 || s.qty.signum() == delta_qty.signum() {
+            if s.qty == 0 {
+                s.last_open_ts = f.ts_exchange;
+            }
             let new_qty = s.qty.saturating_add(delta_qty);
             let abs_old = s.qty.abs() as i128;
             let abs_delta = delta_qty.abs() as i128;
@@ -121,7 +148,7 @@ pub fn pnl_deltas_from_fills(fills: &[TradeFill]) -> Vec<(TsExchangeNs, i64)> {
                 s.avg_price = 0;
             }
             s.qty = new_qty;
-            deltas.push((f.ts_exchange, 0));
+            deltas.push(PnlDelta { ts_exchange: f.ts_exchange, pnl: 0, holding_period: 0 });
             continue;
         }
 
@@ -138,20 +165,28 @@ pub fn pnl_deltas_from_fills(fills: &[TradeFill]) -> Vec<(TsExchangeNs, i64)> {
         let pnl_i128 = (pnl_per_unit.saturating_mul(close_abs)) / FixedPoint::SCALE as i128;
         let pnl_delta_i64 = clamp_i128_to_i64(pnl_i128);
 
+        let holding_period = if pnl_delta_i64 != 0 {
+            f.ts_exchange.saturating_sub(s.last_open_ts)
+        } else {
+            0
+        };
+
         let new_qty = s.qty.saturating_add(delta_qty);
         if new_qty == 0 {
             s.qty = 0;
             s.avg_price = 0;
+            // Position closed, next fill will reset last_open_ts.
         } else if new_qty.signum() == s.qty.signum() {
-            // Reduced but still same direction: keep avg_price.
+            // Reduced but still same direction: keep avg_price and last_open_ts.
             s.qty = new_qty;
         } else {
             // Flipped: leftover opens at this fill price.
             s.qty = new_qty;
             s.avg_price = f.price;
+            s.last_open_ts = f.ts_exchange;
         }
 
-        deltas.push((f.ts_exchange, pnl_delta_i64));
+        deltas.push(PnlDelta { ts_exchange: f.ts_exchange, pnl: pnl_delta_i64, holding_period });
     }
 
     deltas
@@ -219,61 +254,124 @@ pub fn sharpe_ratio_from_pnl_series(pnl: &[i64]) -> f64 {
     mean / std
 }
 
-/// Compute basic stats from fills plus a total funding PnL (quote, scaled).
-pub fn calculate_stats(trade_log: &TradeLog, total_funding_pnl: i64) -> BacktestStats {
-    let fills = trade_log.fills();
-    let deltas = pnl_deltas_from_fills(fills);
-    let mut trade_pnl: i64 = 0;
-    let mut gross_profit: i64 = 0;
-    let mut gross_loss: i64 = 0; // negative
+pub fn sortino_ratio_from_pnl_series(pnl: &[i64]) -> f64 {
+    let n = pnl.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let mean = pnl.iter().map(|&x| x as f64).sum::<f64>() / n as f64;
+    let downside_var = pnl
+        .iter()
+        .map(|&x| {
+            let d = x as f64 - 0.0; // target return 0
+            if d < 0.0 {
+                d * d
+            } else {
+                0.0
+            }
+        })
+        .sum::<f64>()
+        / (n as f64);
+    let downside_std = downside_var.sqrt();
+    if downside_std == 0.0 {
+        return 0.0;
+    }
+    mean / downside_std
+}
 
-    // Use pnl deltas as a basic "return" series.
-    let mut pnl_series: Vec<i64> = Vec::with_capacity(deltas.len());
-    for (_ts, d) in &deltas {
-        trade_pnl = trade_pnl.saturating_add(*d);
+/// Compute basic stats from fills and PnL events (e.g. funding).
+pub fn calculate_stats(trade_log: &TradeLog) -> BacktestStats {
+    let fills = trade_log.fills();
+    let pnl_events = trade_log.pnl_events();
+    
+    let trade_deltas = pnl_deltas_from_fills(fills);
+    let mut all_pnl_deltas: Vec<(TsExchangeNs, i64)> = Vec::with_capacity(trade_deltas.len() + pnl_events.len());
+    
+    let mut total_holding_time: i64 = 0;
+    let mut num_closed_trades: u64 = 0;
+    
+    for d in &trade_deltas {
+        all_pnl_deltas.push((d.ts_exchange, d.pnl));
+        if d.holding_period > 0 {
+            total_holding_time = total_holding_time.saturating_add(d.holding_period);
+            num_closed_trades += 1;
+        }
+    }
+    for e in pnl_events {
+        all_pnl_deltas.push((e.ts_exchange, e.pnl));
+    }
+    // Sort by timestamp to ensure correct equity curve and drawdown.
+    all_pnl_deltas.sort_by_key(|(ts, _)| *ts);
+
+    let mut total_pnl: i64 = 0;
+    let mut gross_profit: i64 = 0;
+    let mut gross_loss: i64 = 0;
+    let mut pnl_series: Vec<i64> = Vec::with_capacity(all_pnl_deltas.len());
+    let mut win_count = 0;
+
+    for (_ts, d) in &all_pnl_deltas {
+        total_pnl = total_pnl.saturating_add(*d);
         pnl_series.push(*d);
         if *d > 0 {
             gross_profit = gross_profit.saturating_add(*d);
+            win_count += 1;
         } else if *d < 0 {
             gross_loss = gross_loss.saturating_add(*d);
         }
     }
 
-    let mut curve = equity_curve_from_pnl_deltas(&deltas);
-    if total_funding_pnl != 0 {
-        let ts = curve.last().map(|(ts, _)| *ts).unwrap_or(0);
-        let eq = curve.last().map(|(_, e)| *e).unwrap_or(0);
-        curve.push((ts, eq.saturating_add(total_funding_pnl)));
-    }
-    let (max_dd, max_dd_dur) = max_drawdown_pct_and_duration(&curve);
+    let curve = equity_curve_from_pnl_deltas(&all_pnl_deltas);
+    let (max_dd_pct, max_dd_dur) = max_drawdown_pct_and_duration(&curve);
+
+    let total_trades = fills.len() as u64;
+    let win_rate = if total_trades > 0 {
+        win_count as f64 / total_trades as f64
+    } else {
+        0.0
+    };
 
     let profit_factor = if gross_loss < 0 {
         gross_profit as f64 / (-gross_loss) as f64
+    } else if gross_profit > 0 {
+        f64::INFINITY
     } else {
         0.0
     };
 
     let sharpe = sharpe_ratio_from_pnl_series(&pnl_series);
+    let sortino = sortino_ratio_from_pnl_series(&pnl_series);
 
-    let total_trades = fills.len() as u64;
+    let calmar = if max_dd_pct > 0.0 {
+        let pnl_units = total_pnl as f64 / FixedPoint::SCALE as f64;
+        pnl_units / (max_dd_pct / 100.0)
+    } else {
+        0.0
+    };
+
     let avg_trade_pnl = if total_trades > 0 {
-        trade_pnl / total_trades as i64
+        total_pnl / total_trades as i64
+    } else {
+        0
+    };
+
+    let avg_holding_period = if num_closed_trades > 0 {
+        total_holding_time / num_closed_trades as i64
     } else {
         0
     };
 
     BacktestStats {
         total_trades,
-        win_rate: 0.0,
+        win_rate,
         profit_factor,
         sharpe_ratio: sharpe,
-        sortino_ratio: 0.0,
-        max_drawdown: max_dd,
+        sortino_ratio: sortino,
+        max_drawdown: max_dd_pct,
         max_drawdown_duration: max_dd_dur,
-        calmar_ratio: 0.0,
-        total_pnl: trade_pnl.saturating_add(total_funding_pnl),
+        calmar_ratio: calmar,
+        total_pnl,
         avg_trade_pnl,
-        avg_holding_period: 0,
+        avg_holding_period,
         total_fees_paid: 0,
     }
 }
@@ -306,7 +404,7 @@ mod tests {
         for f in fills {
             log.push_fill(f);
         }
-        let stats = calculate_stats(&log, 0);
+        let stats = calculate_stats(&log);
 
         // +1.00 quote PnL (scaled by 1e8).
         assert_eq!(stats.total_pnl, 1_00000000);
@@ -319,5 +417,37 @@ mod tests {
         let (dd, dur) = max_drawdown_pct_and_duration(&curve);
         assert!((dd - 25.0).abs() < 1e-12, "dd={dd}");
         assert_eq!(dur, 10);
+    }
+
+    #[test]
+    fn test_stats_funding_pnl_timeseries() {
+        let mut log = TradeLog::default();
+        // 1. Gain 100 at t=10
+        log.push_pnl_event(PnlEvent { ts_exchange: 10, pnl: 100_00000000 });
+        // 2. Lose 20 (funding) at t=20 -> DD = 20%
+        log.push_pnl_event(PnlEvent { ts_exchange: 20, pnl: -20_00000000 });
+        // 3. Gain 50 at t=30 -> New peak 130
+        log.push_pnl_event(PnlEvent { ts_exchange: 30, pnl: 50_00000000 });
+
+        let stats = calculate_stats(&log);
+        assert_eq!(stats.total_pnl, 130_00000000);
+        assert!((stats.max_drawdown - 20.0).abs() < 1e-12);
+        assert_eq!(stats.max_drawdown_duration, 10);
+    }
+
+    #[test]
+    fn test_stats_win_rate_and_profit_factor() {
+        let mut log = TradeLog::default();
+        // Trade 1: Buy 100, Sell 110 -> PnL +10
+        log.push_fill(TradeFill { ts_exchange: 10, symbol_id: 1, order_id: 1, side: Side::Buy, price: 100_00000000, qty: 1_00000000 });
+        log.push_fill(TradeFill { ts_exchange: 11, symbol_id: 1, order_id: 2, side: Side::Sell, price: 110_00000000, qty: 1_00000000 });
+        // Trade 2: Buy 100, Sell 95 -> PnL -5
+        log.push_fill(TradeFill { ts_exchange: 20, symbol_id: 1, order_id: 3, side: Side::Buy, price: 100_00000000, qty: 1_00000000 });
+        log.push_fill(TradeFill { ts_exchange: 21, symbol_id: 1, order_id: 4, side: Side::Sell, price: 95_00000000, qty: 1_00000000 });
+
+        let stats = calculate_stats(&log);
+        assert_eq!(stats.total_trades, 4);
+        assert_eq!(stats.win_rate, 0.25); // 1 win fill / 4 total fills
+        assert_eq!(stats.profit_factor, 2.0); // 10 / 5 = 2.0
     }
 }

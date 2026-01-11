@@ -35,7 +35,7 @@ impl FixedPoint {
     /// Multiply two fixed-point values: (a*b)/SCALE
     pub fn mul_scaled(self, rhs: Self) -> Self {
         let v = (self.0 as i128 * rhs.0 as i128) / Self::SCALE as i128;
-        Self(v as i64)
+        Self(v.clamp(i64::MIN as i128, i64::MAX as i128) as i64)
     }
 }
 
