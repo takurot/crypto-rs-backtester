@@ -3,7 +3,7 @@
 //! Keep fixtures in-memory and small; avoid external datasets.
 
 use crate::event::{Event, EventId, EventKind};
-use crate::types::{L2Update, Order, Side, Tick};
+use crate::types::{L2Update, Order, OrderType, Side, Tick};
 
 pub const SYMBOL_ID_BTC_USDT: u32 = 1;
 
@@ -45,6 +45,7 @@ pub fn order_limit(
         seq,
         symbol_id: SYMBOL_ID_BTC_USDT,
         side,
+        order_type: OrderType::Limit,
         price,
         qty,
     }

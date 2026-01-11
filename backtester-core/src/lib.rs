@@ -1,7 +1,9 @@
 pub mod event;
 pub mod event_queue;
+pub mod exchange_simulator;
 pub mod fixtures;
 pub mod orderbook_l2;
+pub mod queue_model;
 pub mod rng;
 pub mod types;
 
@@ -9,4 +11,7 @@ pub use event::{Event, EventId, EventKind};
 pub use event_queue::EventQueue;
 pub use orderbook_l2::OrderBookL2;
 pub use rng::make_small_rng;
-pub use types::{L2Update, Order, Side, Tick};
+pub use types::{
+    FixedPoint, FundingEvent, L2Update, Order, OrderReport, OrderState, OrderType, Side, Tick,
+    TsExchangeNs, TsLocalNs, TsSimNs,
+};

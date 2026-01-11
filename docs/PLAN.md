@@ -81,7 +81,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
 **Goal**: Establish the pure Rust simulation core with L2 matching engine and event loop.
 
 ### 1.1 Project Scaffolding
-- [ ] **1.1.1 Initialize Rust Workspace**
+- [x] **1.1.1 Initialize Rust Workspace**
     - Create a new Cargo workspace.
     - Setup crates: `backtester-core` (lib), `backtester-py` (cdylib).
     - Add dependencies: `thiserror`, `serde`, `log`, `rust_decimal` (or `i64` implementation), `arrow`, `polars`.
@@ -89,7 +89,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Verification**:
         - `cargo test` passes (no specific test required yet).
 
-- [ ] **1.1.2 Define Core Data Structures** `[Depends on 1.1.1]`
+- [x] **1.1.2 Define Core Data Structures** `[Depends on 1.1.1]`
     - Implement `FixedPoint` helper (satoshi precision).
     - Define time axes types and naming: `ts_exchange`, `ts_local`, `ts_sim` (all nanoseconds).
     - Define `Tick` (logical representation for callbacks/logging) with `ts_exchange` and `ts_local`.
@@ -101,7 +101,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
         - `test_fixed_point_roundtrip_io_only()`
         - `test_order_state_machine_basic_invariants()`
 
-- [ ] **1.1.3 Deterministic Event Model** `[Depends on 1.1.2]`
+- [x] **1.1.3 Deterministic Event Model** `[Depends on 1.1.2]`
     - Define a stable `EventId` / tie-breaker strategy for same-`ts_sim` events.
     - Define an `Event` model that can represent market truth, feed deliveries, order arrivals/ACKs, funding, and timers.
     - **Deliverable**: Unit tests proving stable ordering for same-timestamp events.
@@ -109,7 +109,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
         - `test_event_ordering_same_ts_sim_uses_stable_tiebreak()`
 
 ### 1.2 Matching Engine (L2)
-- [ ] **1.2.1 Implement OrderBook L2** `[Depends on 1.1.2]`
+- [x] **1.2.1 Implement OrderBook L2** `[Depends on 1.1.2]`
     - Create `OrderBook` struct using `BTreeMap<Price, SideQueue>`.
     - Implement `apply_l2_update(price, qty, side)` logic.
     - Implement `get_best_bid/ask`.
@@ -118,7 +118,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
         - `test_orderbook_l2_apply_update_and_best_bid_ask()`
         - `test_orderbook_l2_remove_level_with_qty_zero()`
 
-- [ ] **1.2.2 Implement ExchangeSimulator** `[Depends on 1.2.1]`
+- [x] **1.2.2 Implement ExchangeSimulator** `[Depends on 1.2.1]`
     - Define `ExchangeSimulator` struct.
     - Implement `submit_order` -> generates `OrderID` -> transitions to `PendingNew`.
     - Implement `cancel_order` -> transitions to `PendingCancel`.
@@ -127,7 +127,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
         - `test_exchange_submit_transitions_to_pending_new()`
         - `test_exchange_cancel_transitions_to_pending_cancel()`
 
-- [ ] **1.2.3 Conservative Queue Model** `[Depends on 1.2.2]`
+- [x] **1.2.3 Conservative Queue Model** `[Depends on 1.2.2]`
     - Implement `QueueModel` trait.
     - Implement `ConservativeQueue` (LIFO logic).
     - Integrate with `ExchangeSimulator`: Check for fills on every market trade event.
