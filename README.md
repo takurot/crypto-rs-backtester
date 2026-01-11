@@ -1,5 +1,7 @@
 ### crypt-rs-backtester
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/takurot/crypto-rs-backtester/blob/feature/colab-example/example/colab_backtester_demo.ipynb)
+
 **A research-friendly, tick-level, high-fidelity backtester powered by Rust and Python (Polars).** (WIP / Under Development)
 
 - **Goal**: Combining the agility of Python for research with the high-performance, deterministic simulation of Rust. It aims to solve common HFT backtesting pitfalls: *performance bottlenecks*, *look-ahead bias*, and *lack of reproducibility*.
