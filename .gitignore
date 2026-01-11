@@ -1,1 +1,27 @@
+# Rust
+/target/
+
+# Python
+/.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# Python extension artifacts (maturin develop / editable)
+python/rust_backtester/*.so
+python/rust_backtester/*.pyd
+python/rust_backtester/*.dylib
+python/rust_backtester/*.dll
+
+# OS / IDE
+.DS_Store
 ._*
+.idea/
+.vscode/
+
+# Docs
+docs/START.txt

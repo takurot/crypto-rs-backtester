@@ -24,14 +24,14 @@ This document outlines the detailed implementation tasks for the Rust-based Tick
 **Goal**: Establish deterministic test/bench harnesses early so performance and correctness regressions are caught immediately.
 
 ### 0.1 Rust Unit/Integration Test Scaffolding
-- [ ] **0.1.1 Test Harness & Fixtures**
+- [x] **0.1.1 Test Harness & Fixtures**
     - Add a shared fixtures module for tiny deterministic event streams (in-memory, no heavy datasets).
     - Define helper builders for `Tick`, `L2Update`, `Order`, and `Event` with explicit timestamps and sequence IDs.
     - **Deliverable**: `cargo test` runs a minimal suite in < 1s.
     - **Suggested tests**:
         - `test_fixtures_smoke_builders()`
 
-- [ ] **0.1.2 Determinism Tests**
+- [x] **0.1.2 Determinism Tests**
     - Add tests asserting deterministic ordering for same-timestamp events (stable tie-breakers; no `HashMap` ordering dependence).
     - Add tests asserting reproducibility given the same RNG seed.
     - **Deliverable**: Re-running tests produces bit-identical results (where applicable).
@@ -40,7 +40,7 @@ This document outlines the detailed implementation tasks for the Rust-based Tick
         - `test_reproducible_with_seed()`
 
 ### 0.2 Python E2E Test Scaffolding
-- [ ] **0.2.1 Pytest + Maturin Workflow**
+- [x] **0.2.1 Pytest + Maturin Workflow**
     - Add a `pytest` E2E test target that installs the extension module (e.g., via `maturin develop`) and runs end-to-end backtests.
     - **Deliverable**: A single `pytest` command runs E2E tests locally/CI.
     - **Suggested tests**:
@@ -64,14 +64,14 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
 ```
 
 ### 0.3 Benchmark Scaffolding (Rust + Python)
-- [ ] **0.3.1 Criterion Bench Harness (Rust Core)**
+- [x] **0.3.1 Criterion Bench Harness (Rust Core)**
     - Add `criterion` benches for core hot paths (event loop, order book updates).
     - **Deliverable**: `cargo bench` produces a baseline report.
     - **Suggested benches**:
         - `bench_event_loop_1m_ticks()`
         - `bench_orderbook_apply_l2_1m_updates()`
 
-- [ ] **0.3.2 Python Integration Bench Harness (Optional)**
+- [x] **0.3.2 Python Integration Bench Harness (Optional)**
     - Add a lightweight benchmark for Rust↔Python batch callback overhead (e.g., `pytest-benchmark` or a dedicated timing script).
     - **Deliverable**: A repeatable per-batch overhead measurement.
     - **Suggested benches/tests**:
