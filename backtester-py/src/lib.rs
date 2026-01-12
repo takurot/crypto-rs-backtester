@@ -2,9 +2,13 @@
 
 use std::collections::BTreeMap;
 
+mod arrow_utils;
+
+use arrow_utils::get_arrow_stream;
 use backtester_core::engine::{EngineConfig, EngineMode, Strategy as CoreStrategy};
 use backtester_core::latency_model::ConstantLatency;
 use backtester_core::queue_model::ConservativeQueue;
+use backtester_core::tick_source::ArrowTickSource; // Import TickSource types
 use backtester_core::types::{Order, OrderReport, OrderType, Side, Tick};
 use backtester_core::{BacktestStats, TradeFill};
 use backtester_core::{Context as CoreContext, Engine, EventKind};
@@ -99,6 +103,50 @@ impl Backtester {
             Engine::new(ConservativeQueue, strat, config, latency_model);
 
         schedule_ticks_from_python_polars(py, &self.data, self.feed_latency_ns, &mut engine)?;
+        engine.run();
+
+        let trades = engine.trade_log().fills().to_vec();
+        let stats = engine.stats();
+        Ok(BacktestResult { trades, stats })
+    }
+
+    /// Run backtest using an Arrow RecordBatch stream (zero-copy ingestion).
+    ///
+    /// Expects `stream` to implement the Arrow PyCapsule Interface (`__arrow_c_stream__`).
+    #[pyo3(signature = (stream, strategy))]
+    pub fn run_arrow(
+        &self,
+        py: Python<'_>,
+        stream: Py<PyAny>,
+        strategy: Py<PyAny>,
+    ) -> PyResult<BacktestResult> {
+        let config = EngineConfig {
+            feed_latency_ns: self.feed_latency_ns,
+            order_update_latency_ns: self.feed_latency_ns,
+            mode: match self.python_mode.as_str() {
+                "batch" => EngineMode::Batch,
+                _ => EngineMode::Tick,
+            },
+            max_batch_ns: self.batch_ms.saturating_mul(1_000_000),
+            seed: self.seed,
+        };
+
+        let strat = PyStrategy { obj: strategy };
+        let latency_model = ConstantLatency {
+            feed_latency_ns: self.feed_latency_ns,
+            order_latency_ns: 0,
+        };
+        let mut engine: Engine<ConservativeQueue, PyStrategy, ConstantLatency> =
+            Engine::new(ConservativeQueue, strat, config, latency_model);
+
+        // Zero-copy ingestion
+        let stream_bound = stream.bind(py);
+        let arrow_stream = get_arrow_stream(stream_bound)?;
+        // For now, assume single stream with symbol_id=1.
+        // TODO: support multi-stream or map metadata.
+        let source = ArrowTickSource::new(1, arrow_stream);
+        engine.add_tick_source(Box::new(source));
+
         engine.run();
 
         let trades = engine.trade_log().fills().to_vec();
