@@ -1,87 +1,175 @@
-### crypt-rs-backtester
+### crypto-rs-backtester
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/takurot/crypto-rs-backtester/blob/main/example/colab_backtester_demo.ipynb)
 
-**A research-friendly, tick-level, high-fidelity backtester powered by Rust and Python (Polars).** (WIP / Under Development)
+Japanese version: see `README.ja.md`.
 
-- **Goal**: Combining the agility of Python for research with the high-performance, deterministic simulation of Rust. It aims to solve common HFT backtesting pitfalls: *performance bottlenecks*, *look-ahead bias*, and *lack of reproducibility*.
-- **Target**: Cryptocurrency (CEX) focused, enabling microstructure-level verification including multi-venue dynamics, latency modeling, and queue position (matching) logic.
+A tick-level, high-precision backtester powered by Rust × Python (Polars), designed for researchers. WIP.
+
+- Goal: Combine Python's agility with Rust's deterministic, high-performance simulation to eliminate performance bottlenecks, look-ahead bias, and poor reproducibility.
+- Scope: Mainly crypto spot/futures (CEX). Validates microstructure such as multi-exchange, latency, and queue position.
 
 ---
 
 ### Why use this tool?
 
-- **Performant by Design**: The core is built in Rust using an event-driven architecture and fixed-point arithmetic, allowing Python to focus purely on the research interface.
-- **Zero-Copy Data Pipeline**: Leveraging Polars (Apache Arrow) for pre-processing in Python and handing off data to Rust with minimal memory copying.
-- **Microstructure Fidelity**: Simulates realistic market conditions such as latency jitter/interpolation, L2/L3 queue models, and the "PendingCancel" race conditions.
-- **Determinism First**: Ensures 100% reproducibility via seeded RNGs and stable tie-breaking for events with identical timestamps.
+- Performant by design: Rust event-driven core with fixed-point arithmetic; Python focuses on research interface.
+- Zero-copy pipeline: Use Polars (Arrow) in Python and hand off to Rust with minimal copying.
+- Microstructure fidelity: Latency modeling, L2/L3 queue logic, and realistic race conditions (e.g., PendingCancel).
+- Determinism first: Seeded RNGs, stable tie-breaking for identical timestamps.
 
 ---
 
-### Key Features (Goals & Specifications)
+### Features (current state)
 
-- **Hybrid Architecture**: Rust simulation core + Python strategy/analysis interface.
-- **Time Axis Separation**:
-  - **`ts_exchange`**: Ground-truth market time (venue timestamp).
-  - **`ts_local`**: Time observed by the strategy (reflecting feed latency).
-  - **`ts_sim`**: Internal simulation clock ordering all discrete events.
-- **Look-ahead Bias Prevention**: Strategies can only access the feed-delayed `MarketView` consistent with their `ts_local`.
-- **Python Strategy Execution Modes**:
-  - **Tick Mode**: `on_tick` callback (simple and intuitive).
-  - **Batch Mode**: `on_ticks` / `on_order_updates` (optimized for higher throughput by reducing FFI overhead).
-- **Fixed-Point Arithmetic**: All monetary values (price, qty) use `i64` fixed-point math; `f64` is strictly limited to I/O boundaries.
+- Hybrid architecture: Rust core (event-driven, fixed-point i64) + Python strategy interface.
+- Separated timelines: `ts_exchange` (ground truth) / `ts_local` (what the strategy observes) / `ts_sim` (total order of all events).
+- Look-ahead prevention: Strategies only see `MarketView` after feed latency. Order arrival and ACK are strictly ordered on `ts_sim`.
+- Execution modes: Tick mode (`on_tick`) and Batch mode (`on_ticks` / `on_order_updates`).
+- Data ingestion: via Polars LazyFrame (minimal copying), or zero-copy via Arrow C Stream (`run_arrow`).
+- Determinism: Fixed RNG seed, stable tie-breakers for simultaneous events, lexicographic assignment of symbol IDs.
 
-For more details, see `docs/SPEC.md`.
+See `docs/SPEC.md` for details.
 
 ---
 
-### Status (Important)
+### Repository Structure
 
-**Currently under active development (WIP).** The API, internal architecture, and file structure are subject to change.
-
-- **Technical Specification**: `docs/SPEC.md`
-- **Implementation Plan (Tasks/Tests/Benches)**: `docs/PLAN.md`
+- `backtester-core/`: Rust simulation core (`src/*.rs`, `tests/`, `benches/`)
+- `backtester-py/`: PyO3 wrapper exposing the core to Python
+- `python/`: Python package `rust_backtester/` and tests in `python/tests/`
+- `docs/`: Specs and plans (`SPEC.md`, `PLAN.md`, etc.)
+- Root `Cargo.toml`: Rust workspace, `pyproject.toml`: maturin build
 
 ---
 
-### Usage (Example / Pseudo-code)
+### Install & Build (dev)
+
+Prerequisites: Python 3.9+ / Rust toolchain / maturin
+
+```bash
+# Virtualenv
+python -m venv .venv && source .venv/bin/activate
+
+# Dev install (builds Rust extension)
+pip install -e .[dev]
+
+# Alternative: direct build
+maturin develop
+```
+
+---
+
+### Quickstart (Python)
+
+Required columns: `ts_exchange:Int64`, `price:Int64`, `qty:Int64`, `side:Int8`
+Recommended: `seq:Int64` (stable order for same-timestamp), `ts_local:Int64` (if missing, applies `ts_exchange + feed_latency_ns`)
+Aliases: `ts_event` ≈ `ts_exchange`, `size` ≈ `qty`
 
 ```python
 import polars as pl
-from rust_backtester import Backtester, Strategy, QueueModel, LatencyModel
+from rust_backtester import Backtester
 
-class MyStrategy(Strategy):
-    def on_ticks(self, ticks, ctx):
-        # ticks: observations after feed delay (ts_local basis)
-        for t in ticks:
-            # e.g., Submit order if conditions are met
-            pass
+# Tiny deterministic dataset (1e-8 fixed point: 100.0 => 100_00000000)
+lf = pl.DataFrame({
+    "ts_exchange": [1_000, 2_000, 3_000, 4_000],
+    "price": [100_00000000, 101_00000000, 99_00000000, 100_00000000],
+    "qty":   [  1_00000000,   1_00000000,  1_00000000,   1_00000000],
+    "side":  [            1,           -1,           1,           -1],
+    "seq": list(range(4)),
+}).lazy()
 
-# Recommended: Use LazyFrame for zero-copy ingestion
-df = pl.scan_parquet("data/btc_usdt/*.parquet")
+class MyStrategy:
+    def on_tick(self, tick: dict, ctx):
+        # Example: place a passive order using the received tick
+        ctx.submit_order(
+            symbol_id=int(tick["symbol_id"]),
+            side=1,  # 1=Buy, -1=Sell
+            price=int(tick["price"]),
+            qty=1_00000000,
+        )
 
 bt = Backtester(
-    data={"binance:BTC/USDT": df},
-    python_mode="batch",
-    batch_ms=100,
+    data={"binance:BTC/USDT": lf},
     seed=42,
-    latency_model=LatencyModel.log_normal(mean_ms=5, std_ms=2),
-    queue_model=QueueModel.volume_clock(),
+    python_mode="tick",    # or "batch"
+    batch_ms=100,
+    feed_latency_ns=1_000,  # applies ts_local = ts_exchange + 1_000 (ns)
 )
 
 result = bt.run(MyStrategy())
-trades = result.trades()
-stats = result.stats()
+print(result.stats())
+print(result.trades())
 ```
 
-*Note: This example illustrates the intended API. Implementation status depends on the progress tracked in `docs/PLAN.md`.*
+Batch mode (higher throughput)
+
+```python
+class MyBatch:
+    def on_ticks(self, ticks: list[dict], ctx):
+        for t in ticks:
+            ctx.submit_order(symbol_id=t["symbol_id"], side=1, price=t["price"], qty=1_00000000)
+
+bt = Backtester(data={"binance:BTC/USDT": lf}, seed=42, python_mode="batch", batch_ms=50)
+res = bt.run(MyBatch())
+```
+
+Arrow zero-copy path (for large datasets)
+
+```python
+# Pass a PyArrow RecordBatchReader implementing __arrow_c_stream__
+res = bt.run_arrow(stream=rb_reader, strategy=MyBatch())
+```
 
 ---
 
-### Contributing / Development
+### Build, Test, Benchmarks
 
-- **Prerequisites**: Read `docs/SPEC.md` → `docs/PLAN.md`.
-- **Core Principles**:
-  - Never break determinism (seed consistency, stable event ordering).
-  - Do not use `f64` for core monetary/accounting logic.
-  - Prioritize batching and zero-copy for Python-Rust FFI.
+- Python tests: `pytest -q`
+  - Benchmarks only: `pytest -m bench -q`
+- Rust build: `cargo build -p backtester-core`
+- Rust tests: `cargo test -p backtester-core`
+- Rust benches: `cargo bench -p backtester-core`
+
+Note: `python/tests/conftest.py` auto-runs `maturin develop` if the extension isn't installed.
+
+---
+
+### Examples (example/)
+
+- `example/colab_backtester_demo.ipynb`
+  - Minimal E2E demo notebook. Click the badge above to run in Colab.
+  - For local use, start Jupyter from the repo root and open files under `example/`.
+- `example/crypto_researcher_adoption_guide.md`
+  - Practical guide for researchers: onboarding, data schema, strategy modes (tick/batch), performance tuning.
+
+Note: Large datasets are not bundled. Start with the minimal data generated by tests in `python/tests/` or the Colab demo.
+
+---
+
+### Coding Style & Core Principles
+
+- Rust: edition 2024, `cargo fmt` / `cargo clippy`. Naming: functions/modules `snake_case`, types `CamelCase`.
+- Python: PEP 8, 4-space indent. Type hints required for new/changed code.
+- Determinism first: fixed RNG seeds, stable ordering. Avoid `f64` for monetary logic (only at I/O boundaries).
+
+---
+
+### Contribution & Commit Guidelines
+
+- Start with `docs/SPEC.md` and `docs/PLAN.md`.
+- Conventional Commits: e.g., `feat(core): add queue model`, `chore(fmt): rustfmt`.
+- Branches: `feature/...`, `fix/...`, `chore/...`.
+- PRs should include What/Why, linked issues, test plan (commands + results), and performance notes if core paths changed. Update `docs/` when APIs or architecture shift.
+
+---
+
+### Status & Roadmap
+
+This project is under active development (WIP). APIs and internals may change.
+
+- Technical spec: `docs/SPEC.md`
+- Plan/tests/benches: `docs/PLAN.md`
+- Researcher adoption guide: `example/crypto_researcher_adoption_guide.md`
+- Colab demo: `example/colab_backtester_demo.ipynb`
+
