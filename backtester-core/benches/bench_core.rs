@@ -85,7 +85,11 @@ impl GenTickSource {
         }
         let ts_ex = self.base_ts + (i as i64) * self.dt;
         let price = self.price_base + ((i as i64) % self.price_span);
-        let side = if i.is_multiple_of(2) { Side::Buy } else { Side::Sell };
+        let side = if i.is_multiple_of(2) {
+            Side::Buy
+        } else {
+            Side::Sell
+        };
         Some(Tick {
             ts_exchange: ts_ex,
             ts_local: 0, // let Engine apply feed latency
