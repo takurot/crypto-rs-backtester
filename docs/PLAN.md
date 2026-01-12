@@ -9,6 +9,12 @@ This document outlines the detailed implementation tasks for the Rust-based Tick
 
 ---
 
+## Current Implementation Snapshot
+- Phases 0–4: completed and covered by tests/benches.
+- Phase 5.1: Arrow C Stream zero-copy ingestion implemented (`backtester-py/src/arrow_utils.rs`, `run_arrow`), E2E smoke test present.
+- Phase 5.2: Streaming `TickSource` + lazy scheduling implemented (`backtester-core/src/tick_source.rs`, engine `sources` with deterministic tie-breakers).
+- Phase 5.3–5.6: not started.
+
 ## Test Naming & Layout Conventions (Applies to tasks below)
 - **Rust unit tests**: co-located in `backtester-core/src/**` using `#[cfg(test)] mod tests { ... }`
   - Naming: `test_<unit>_<behavior>_<expected>()`
@@ -297,7 +303,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
 ## Phase 5: Scale & Optimization (Future)
 **Goal**: Achieve true zero-copy ingestion, reduce memory overhead for long backtests, enable fast parameter sweeps, and make performance regressions observable—without breaking determinism / look-ahead prevention / fixed-point money rules.
 
-- [ ] **5.1 True Zero-Copy Ingestion (Arrow C Data Interface)** `[Depends on 2.2.1]`
+- [x] **5.1 True Zero-Copy Ingestion (Arrow C Data Interface)** `[Depends on 2.2.1]`
     - Accept an Arrow `RecordBatch` stream from Python (e.g., `pyarrow.RecordBatchReader`) via the Arrow C Data Interface.
     - Implement a Rust-side columnar iterator (SoA) that reads required columns (`ts_exchange`, `price`, `qty`, `side`, optional `seq`, optional `ts_local`, optional `flags`) without materializing a full `Vec<Tick>`.
     - Enforce/validate per-stream ordering by (`ts_exchange`, `seq`) ascending; reject unsorted streams rather than sorting internally (determinism + perf).
@@ -306,7 +312,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
         - Rust: `test_tick_source_arrow_schema_aliases_smoke()`
         - Python E2E: `test_e2e_arrow_stream_ingestion_smoke()`
 
-- [ ] **5.2 Streaming TickSource + Lazy Event Scheduling** `[Depends on 1.3.1, 5.1]`
+- [x] **5.2 Streaming TickSource + Lazy Event Scheduling** `[Depends on 1.3.1, 5.1]`
     - Introduce a `TickSource` abstraction per `(exchange, symbol)` stream that yields the next market-truth tick.
     - Update the engine to advance each stream lazily (schedule only next truth + next delivery per stream; push subsequent ticks as prior ticks are consumed).
     - Preserve global determinism with stable tie-breakers for same-`ts_sim` events (never rely on stream iteration order).
