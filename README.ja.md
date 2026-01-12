@@ -124,6 +124,34 @@ res = bt.run_arrow(stream=rb_reader, strategy=MyBatch())
 
 ---
 
+### ベンチマーク設定（実践条件を可変）
+
+Rust の Criterion ベンチは以下の環境変数で条件を変更できます（既定: 4 シンボル × 各 250k ティック）。
+
+- `BACKTEST_BENCH_NSYMBOLS`（既定: `4`）
+- `BACKTEST_BENCH_TICKS_PER_SYMBOL`（既定: `250000`）
+- `BACKTEST_BENCH_DT_NS` ティック間隔 ns（既定: `1000`）
+- `BACKTEST_BENCH_SYMBOL_STAGGER_NS` シンボル開始オフセット ns（既定: `10000`）
+- `BACKTEST_BENCH_FEED_LATENCY_NS`（既定: `2000000`）
+- `BACKTEST_BENCH_ORDER_UPDATE_LATENCY_NS`（既定: `1000000`）
+- `BACKTEST_BENCH_ORDER_LATENCY_NS`（既定: `500000`）
+- `BACKTEST_BENCH_SUBMIT_EVERY_N` 何ティックごとに発注するか（既定: `256`）
+- `BACKTEST_BENCH_MAX_BATCH_NS` バッチモードのウィンドウ ns（既定: `10000000`）
+
+例:
+
+```bash
+# 8 シンボル × 各 500k ティック、バッチウィンドウ 5ms で計測
+BACKTEST_BENCH_NSYMBOLS=8 \
+BACKTEST_BENCH_TICKS_PER_SYMBOL=500000 \
+BACKTEST_BENCH_MAX_BATCH_NS=5000000 \
+cargo bench -p backtester-core --bench bench_core
+```
+
+ベンチ項目（`bench_engine_e2e_*`）は Tick/Batch 両方を同条件で測定します。生成系データは決定論的で、実運用に近い発注（逆サイド・同価格の小ロット指値を一定間隔で送信）を含みます。
+
+---
+
 ### サンプル（example/）
 
 - `example/colab_backtester_demo.ipynb`
@@ -161,4 +189,3 @@ res = bt.run_arrow(stream=rb_reader, strategy=MyBatch())
 - 実装計画/テスト/ベンチ: `docs/PLAN.md`
 - 研究者向け導入ガイド: `example/crypto_researcher_adoption_guide.md`
 - Colab デモ: `example/colab_backtester_demo.ipynb`
-

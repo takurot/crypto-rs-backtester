@@ -135,6 +135,34 @@ Note: `python/tests/conftest.py` auto-runs `maturin develop` if the extension is
 
 ---
 
+### Benchmark Configuration (Practical Conditions)
+
+Criterion benches in Rust can be tuned via environment variables (defaults: 4 symbols × 250k ticks each):
+
+- `BACKTEST_BENCH_NSYMBOLS` (default: `4`)
+- `BACKTEST_BENCH_TICKS_PER_SYMBOL` (default: `250000`)
+- `BACKTEST_BENCH_DT_NS` tick spacing in ns (default: `1000`)
+- `BACKTEST_BENCH_SYMBOL_STAGGER_NS` per-symbol start offset in ns (default: `10000`)
+- `BACKTEST_BENCH_FEED_LATENCY_NS` (default: `2000000`)
+- `BACKTEST_BENCH_ORDER_UPDATE_LATENCY_NS` (default: `1000000`)
+- `BACKTEST_BENCH_ORDER_LATENCY_NS` (default: `500000`)
+- `BACKTEST_BENCH_SUBMIT_EVERY_N` order submission interval in ticks (default: `256`)
+- `BACKTEST_BENCH_MAX_BATCH_NS` batch-mode window in ns (default: `10000000`)
+
+Example:
+
+```bash
+# 8 symbols × 500k ticks per symbol, 5ms batch window
+BACKTEST_BENCH_NSYMBOLS=8 \
+BACKTEST_BENCH_TICKS_PER_SYMBOL=500000 \
+BACKTEST_BENCH_MAX_BATCH_NS=5000000 \
+cargo bench -p backtester-core --bench bench_core
+```
+
+The E2E benches (`bench_engine_e2e_*`) measure both Tick and Batch modes under identical conditions. Synthetic data is deterministic and includes realistic order flow (opposite-side, same-price passive limit orders at a fixed interval).
+
+---
+
 ### Examples (example/)
 
 - `example/colab_backtester_demo.ipynb`
@@ -172,4 +200,3 @@ This project is under active development (WIP). APIs and internals may change.
 - Plan/tests/benches: `docs/PLAN.md`
 - Researcher adoption guide: `example/crypto_researcher_adoption_guide.md`
 - Colab demo: `example/colab_backtester_demo.ipynb`
-
