@@ -85,7 +85,7 @@ impl GenTickSource {
         }
         let ts_ex = self.base_ts + (i as i64) * self.dt;
         let price = self.price_base + ((i as i64) % self.price_span);
-        let side = if i % 2 == 0 { Side::Buy } else { Side::Sell };
+        let side = if i.is_multiple_of(2) { Side::Buy } else { Side::Sell };
         Some(Tick {
             ts_exchange: ts_ex,
             ts_local: 0, // let Engine apply feed latency
@@ -139,7 +139,7 @@ impl Strategy for LoadStrategy {
             .and_modify(|c| *c = c.saturating_add(1))
             .or_insert(1);
 
-        if *n % self.every_n == 0 {
+        if (*n).is_multiple_of(self.every_n) {
             // Submit an order against the trade with the same price; likely to fill soon.
             let side = match tick.side {
                 Side::Buy => Side::Sell,
