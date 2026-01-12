@@ -6,9 +6,9 @@ mod arrow_utils;
 
 use arrow_utils::get_arrow_stream;
 use backtester_core::engine::{EngineConfig, EngineMode, Strategy as CoreStrategy};
-use backtester_core::tick_source::{ArrowTickSource, TickSource}; // Import TickSource types
 use backtester_core::latency_model::ConstantLatency;
 use backtester_core::queue_model::ConservativeQueue;
+use backtester_core::tick_source::ArrowTickSource; // Import TickSource types
 use backtester_core::types::{Order, OrderReport, OrderType, Side, Tick};
 use backtester_core::{BacktestStats, TradeFill};
 use backtester_core::{Context as CoreContext, Engine, EventKind};
@@ -111,7 +111,7 @@ impl Backtester {
     }
 
     /// Run backtest using an Arrow RecordBatch stream (zero-copy ingestion).
-    /// 
+    ///
     /// Expects `stream` to implement the Arrow PyCapsule Interface (`__arrow_c_stream__`).
     #[pyo3(signature = (stream, strategy))]
     pub fn run_arrow(

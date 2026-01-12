@@ -30,27 +30,27 @@ pub fn get_arrow_stream(obj: &Bound<'_, PyAny>) -> PyResult<ArrowArrayStreamRead
     // 2. Validate capsule name
     let name = capsule.name()?;
     if name != Some(CString::new("arrow_array_stream").unwrap().as_c_str()) {
-        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            format!("Expected capsule name 'arrow_array_stream', got {:?}", name),
-        ));
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "Expected capsule name 'arrow_array_stream', got {:?}",
+            name
+        )));
     }
 
     // 3. Extract pointer
     // Workaround: PyCapsule_GetPointer fails with name mismatch even when correct.
     // Strategy: Validate name manually, then set name to NULL (stealing ownership), then GetPointer(NULL).
-    
+
     // Clear the capsule name to ensure we don't use it again and to allow GetPointer(NULL)
     let ret = unsafe { pyo3::ffi::PyCapsule_SetName(capsule.as_ptr(), std::ptr::null()) };
     if ret != 0 {
-         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Failed to clear PyCapsule name",
         ));
     }
 
-    let stream_ptr = unsafe {
-         pyo3::ffi::PyCapsule_GetPointer(capsule.as_ptr(), std::ptr::null())
-    } as *mut FFI_ArrowArrayStream;
-    
+    let stream_ptr = unsafe { pyo3::ffi::PyCapsule_GetPointer(capsule.as_ptr(), std::ptr::null()) }
+        as *mut FFI_ArrowArrayStream;
+
     if stream_ptr.is_null() {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Arrow stream capsule contains NULL pointer",
@@ -60,9 +60,9 @@ pub fn get_arrow_stream(obj: &Bound<'_, PyAny>) -> PyResult<ArrowArrayStreamRead
     // 4. Move ownership to Rust
     // To prevent double-free (Python GC vs Rust Drop), we must steal ownership.
     // We do this by nulling out the capsule so its destructor does nothing.
-    
+
     // a. Clear name (already done above to allow GetPointer(NULL))
-    
+
     // b. Clear pointer
     let ret = unsafe { pyo3::ffi::PyCapsule_SetPointer(capsule.as_ptr(), std::ptr::null_mut()) };
     if ret != 0 {
@@ -74,7 +74,7 @@ pub fn get_arrow_stream(obj: &Bound<'_, PyAny>) -> PyResult<ArrowArrayStreamRead
     // c. Clear destructor
     let ret = unsafe { pyo3::ffi::PyCapsule_SetDestructor(capsule.as_ptr(), None) };
     if ret != 0 {
-         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Failed to clear PyCapsule destructor",
         ));
     }

@@ -1,8 +1,7 @@
 use crate::types::{Side, Tick};
-use arrow::array::{Array, Int64Array, Int8Array};
+use arrow::array::{Array, Int8Array, Int64Array};
 use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::record_batch::RecordBatch;
-
 
 /// A source of ticks for a single (exchange, symbol) stream.
 ///
@@ -46,12 +45,14 @@ impl ArrowTickSource {
     fn advance(&mut self) {
         loop {
             // If we have a current batch, try to read the next row
-            if let Some(batch) = &self.current_batch {
-                if self.batch_idx < batch.num_rows() {
-                    self.next_tick = Some(self.read_tick_at(batch, self.batch_idx));
-                    self.batch_idx += 1;
-                    return;
-                }
+            if let Some(batch) = self
+                .current_batch
+                .as_ref()
+                .filter(|b| self.batch_idx < b.num_rows())
+            {
+                self.next_tick = Some(self.read_tick_at(batch, self.batch_idx));
+                self.batch_idx += 1;
+                return;
             }
 
             // No current batch or batch exhausted, try to load next batch
@@ -83,33 +84,43 @@ impl ArrowTickSource {
         // side: Int8
         // seq: Int64 (optional)
         // ts_local: Int64 (optional)
-        
 
-
-        let ts_exchange_arr = batch.column_by_name("ts_exchange")
+        let ts_exchange_arr = batch
+            .column_by_name("ts_exchange")
             .expect("missing ts_exchange")
-            .as_any().downcast_ref::<Int64Array>().expect("ts_exchange not Int64");
-        
-        let price_arr = batch.column_by_name("price")
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("ts_exchange not Int64");
+
+        let price_arr = batch
+            .column_by_name("price")
             .expect("missing price")
-            .as_any().downcast_ref::<Int64Array>().expect("price not Int64");
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("price not Int64");
 
         // qty or size
-        let qty_arr = batch.column_by_name("qty")
+        let qty_arr = batch
+            .column_by_name("qty")
             .or_else(|| batch.column_by_name("size"))
             .expect("missing qty/size")
-            .as_any().downcast_ref::<Int64Array>().expect("qty not Int64");
-            
-        let side_arr = batch.column_by_name("side")
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("qty not Int64");
+
+        let side_arr = batch
+            .column_by_name("side")
             .expect("missing side")
-            .as_any().downcast_ref::<Int8Array>().expect("side not Int8");
+            .as_any()
+            .downcast_ref::<Int8Array>()
+            .expect("side not Int8");
 
         let ts_exchange = ts_exchange_arr.value(idx);
         let price = price_arr.value(idx);
         let qty = qty_arr.value(idx);
         let side_val = side_arr.value(idx);
         let side = Side::try_from(side_val).expect("invalid side");
-        
+
         let seq = if let Some(col) = batch.column_by_name("seq") {
             if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
                 arr.value(idx) as u64
@@ -138,7 +149,7 @@ impl ArrowTickSource {
             price,
             qty,
             side,
-            flags: 0, 
+            flags: 0,
         }
     }
 }
