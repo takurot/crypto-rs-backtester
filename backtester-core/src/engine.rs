@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use crate::account::Account;
 use crate::event::{Event, EventId, EventKind};
+use crate::tick_source::TickSource;
+
 use crate::event_queue::EventQueue;
 use crate::exchange_simulator::ExchangeSimulator;
 use crate::latency_model::LatencyModel;
@@ -124,7 +126,6 @@ impl<'a> Context<'a> {
 }
 
 /// Discrete-event simulation engine.
-#[derive(Debug)]
 pub struct Engine<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> {
     config: EngineConfig,
     queue: EventQueue,
@@ -149,6 +150,8 @@ pub struct Engine<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> {
     report_buffer: Vec<OrderReport>,
     active_batch_timer_id: Option<u64>,
     next_timer_id: u64,
+    // Phase 5.2: Streaming sources
+    sources: Vec<Box<dyn TickSource>>,
 }
 
 impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
@@ -173,9 +176,14 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             report_buffer: Vec::new(),
             active_batch_timer_id: None,
             next_timer_id: 1,
+            sources: Vec::new(),
         }
     }
 
+    pub fn add_tick_source(&mut self, source: Box<dyn TickSource>) {
+        self.sources.push(source);
+    }
+    
     pub fn strategy(&self) -> &S {
         &self.strategy
     }
@@ -229,6 +237,69 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
     }
 
     pub fn step(&mut self) -> Option<Event> {
+        // 1. Ingest from sources if they have events earlier than (or equal to) the queue head.
+        // We repeat this check because ingesting one source tick might simply push to the queue,
+        // and we might need to ingest another one before popping.
+        loop {
+            let mut min_source_idx = None;
+            let mut min_source_ts = i64::MAX;
+
+            for (i, source) in self.sources.iter_mut().enumerate() {
+                if let Some(tick) = source.peek() {
+                    // We schedule Tick at ts_exchange.
+                    // Tie-breaking: if timestamps are equal, we prefer the source with the lower index (stable/deterministic).
+                    if tick.ts_exchange < min_source_ts {
+                        min_source_ts = tick.ts_exchange;
+                        min_source_idx = Some(i);
+                    }
+                }
+            }
+
+            let next_queue_ts = self.queue.peek().map(|e| e.ts_sim()).unwrap_or(i64::MAX);
+
+            if min_source_ts != i64::MAX && min_source_ts <= next_queue_ts {
+                // Ingest from the identified source
+                if let Some(idx) = min_source_idx {
+                    if let Some(tick) = self.sources[idx].next() {
+                         // Schedule Tick event (truth)
+                         self.push_event(tick.ts_exchange, EventKind::Tick(tick));
+                         
+                         // Schedule TickDelivery event (strategy)
+                         // Apply feed latency if ts_local is not provided or invalid?
+                         // The Tick struct usually comes with ts_local populated by source or we enforce it here?
+                         // ArrowTickSource populated ts_local using `ts_exchange + config_latency`? 
+                         // No, ArrowTickSource takes `ts_local` column OR `ts_exchange`.
+                         // If `ts_local` is 0/missing in struct, we might want to override it?
+                         // But TickSource should yield valid Ticks.
+                         // Let's assume Tick is valid.
+                         // Note: `run_arrow` in lib.rs sets `ts_local` if column missing logic? No.
+                         // ArrowTickSource uses 0 if missing.
+                         
+                         // If ts_local is 0, we should apply config.feed_latency_ns.
+                         let delivery_ts = if tick.ts_local == 0 {
+                             tick.ts_exchange + self.config.feed_latency_ns
+                         } else {
+                             tick.ts_local
+                         };
+                         
+                         // Fix the tick's ts_local if we calculated it
+                         let mut delivered_tick = tick;
+                         delivered_tick.ts_local = delivery_ts;
+                         
+                         self.push_event(delivery_ts, EventKind::TickDelivery(delivered_tick));
+                    }
+                }
+                // Continue loop to check sources/queue again
+                continue;
+            }
+            
+            // If we are here, either sources are empty or queue head is earlier than any source.
+            if self.queue.peek().is_none() {
+                 return None;
+            }
+            break;
+        }
+
         let event = self.queue.pop()?;
         self.now_ts_sim = event.ts_sim();
 
@@ -727,5 +798,112 @@ mod tests {
                 .get_order(order_id)
                 .is_none()
         );
+    }
+
+    // Helper source for testing
+    struct VecTickSource {
+        symbol_id: u32,
+        ticks: std::vec::IntoIter<Tick>,
+        next_tick: Option<Tick>,
+    }
+
+    impl VecTickSource {
+        fn new(symbol_id: u32, ticks: Vec<Tick>) -> Self {
+            let mut iter = ticks.into_iter();
+            let next_tick = iter.next();
+            Self {
+                symbol_id,
+                ticks: iter,
+                next_tick,
+            }
+        }
+    }
+
+    impl TickSource for VecTickSource {
+        fn next(&mut self) -> Option<Tick> {
+            let current = self.next_tick;
+            self.next_tick = self.ticks.next();
+            current
+        }
+
+        fn peek(&mut self) -> Option<&Tick> {
+            self.next_tick.as_ref()
+        }
+
+        fn symbol_id(&self) -> u32 {
+            self.symbol_id
+        }
+    }
+
+    #[test]
+    fn test_engine_streaming_tick_source_equivalence_to_materialized() {
+        let config = EngineConfig {
+            feed_latency_ns: 1_000,
+            order_update_latency_ns: 1_000,
+            mode: EngineMode::Tick,
+            max_batch_ns: 0,
+            seed: 42,
+        };
+        let t0 = fixtures::tick_trade(1_000, 1_000, 0);
+        let t1 = Tick {
+            ts_exchange: 3_000,
+            ts_local: 3_000,
+            seq: 1,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            price: 100_00000000,
+            qty: 1_00000000,
+            side: Side::Sell,
+            flags: 0x01,
+        };
+        let ticks = vec![t0, t1];
+
+        // 1. Materialized Run (Manual push_event)
+        let stats_mat = {
+            let strategy = RecordingStrategy::default();
+            let latency_model = ConstantLatency {
+                feed_latency_ns: config.feed_latency_ns,
+                order_latency_ns: 0,
+            };
+            let mut eng = Engine::new(ConservativeQueue, strategy, config, latency_model);
+            
+            // Replicate materialized loading logic (Tick + Delivery)
+            for t in &ticks {
+                eng.push_event(t.ts_exchange, EventKind::Tick(*t));
+                let mut delivery = *t;
+                delivery.ts_local = t.ts_exchange + config.feed_latency_ns;
+                eng.push_event(delivery.ts_local, EventKind::TickDelivery(delivery));
+            }
+            
+            eng.run();
+            eng.stats()
+        };
+
+        // 2. Streaming Run (VecTickSource)
+        let stats_stream = {
+            let strategy = RecordingStrategy::default();
+            let latency_model = ConstantLatency {
+                feed_latency_ns: config.feed_latency_ns,
+                order_latency_ns: 0,
+            };
+            let mut eng = Engine::new(ConservativeQueue, strategy, config, latency_model);
+            
+            // Streaming source ticks should trigger Engine's default latency application 
+            // if ts_local is 0. 
+            let stream_ticks = ticks.iter().map(|t| {
+                let mut t2 = *t;
+                t2.ts_local = 0; // Trigger Engine default latency logic
+                t2
+            }).collect();
+            
+            let source = VecTickSource::new(fixtures::SYMBOL_ID_BTC_USDT, stream_ticks);
+            eng.add_tick_source(Box::new(source));
+            
+            eng.run();
+            eng.stats()
+        };
+
+        // Compare
+        assert_eq!(stats_mat.total_trades, stats_stream.total_trades, "Total trades mismatch");
+        assert_eq!(stats_mat.total_pnl, stats_stream.total_pnl, "Total PnL mismatch");
     }
 }

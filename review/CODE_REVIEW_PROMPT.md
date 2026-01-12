@@ -1,51 +1,97 @@
-# Code Review Prompt for crypto-rs-backtester
+# Code Review Request: Phase 5 - Zero-Copy Ingestion & Streaming TickSource
 
-Use this prompt to guide reviews across Rust core, PyO3 wrapper, and Python package.
+## Branch
+`feature/phase5-scale-optimization`
 
-## Goals
-- Uphold determinism and reproducibility end-to-end (seeded RNG, stable ordering).
-- Maintain performance in hot paths; avoid accidental Python overhead in core loops.
-- Keep FFI boundary clear, safe, and well-tested across tick vs batch modes.
-- Preserve money-safety (no f64 for monetary amounts) and correctness.
+## Summary
+This PR implements Phase 5 of the Rust Backtester project, focusing on **Scale & Optimization**. The main goals are:
 
-## Reviewer Checklist
+1. **Zero-Copy Data Ingestion**: Enable efficient ingestion of large datasets using the Arrow C Data Interface
+2. **Streaming TickSource**: Refactor the Engine to support lazy/streaming tick ingestion instead of pre-loading all data
 
-Architecture & Boundaries
-- Are responsibilities well separated between `backtester-core` (engine), `backtester-py` (FFI), and `python/` (package/tests)?
-- Are FFI surfaces minimal and stable? Are Python types converted to primitive Rust types early, with zero/low-copy where possible?
-- Is determinism preserved (sorted keys, stable symbol_id mapping, fixed seeds)? Any hidden nondeterminism (hash maps, iteration order)?
+## Files Changed
 
-Correctness & Safety
-- Are monetary values integers (i64/i128) not f64? Any conversions that may overflow or lose precision?
-- Are error cases handled with meaningful messages on both sides (Rust errors -> Python exceptions)?
-- Thread-safety or aliasing concerns at the FFI boundary? Any `unsafe` blocks justified and minimal?
+### New Files
+| File | Description |
+|------|-------------|
+| `backtester-core/src/tick_source.rs` | `TickSource` trait and `ArrowTickSource` implementation for zero-copy Arrow stream ingestion |
+| `backtester-py/src/arrow_utils.rs` | FFI utilities to extract Arrow streams from Python PyCapsule objects |
+| `python/tests/test_e2e_arrow_stream_ingestion_smoke.py` | E2E test validating Arrow stream ingestion from Python |
 
-Performance
-- Hot loops avoid Python callbacks unless explicitly in tick mode? Batch mode pathways reduce per-tick Python overhead?
-- Data marshaling: are large arrays/lists handled efficiently (avoid repeated Python->Rust conversions)? Any opportunities to stream or lazily load?
-- Latency/queue models and event scheduling avoid unnecessary allocations or cloning?
+### Modified Files
+| File | Description |
+|------|-------------|
+| `backtester-core/Cargo.toml` | Added `arrow` dependency with `ffi` feature |
+| `backtester-core/src/lib.rs` | Exposed `tick_source` module and types |
+| `backtester-core/src/engine.rs` | Added `sources` field, `add_tick_source()` method, and lazy ingestion logic in `step()` |
+| `backtester-py/Cargo.toml` | Added `arrow` dependency with `pyarrow` feature |
+| `backtester-py/src/lib.rs` | Added `run_arrow()` method using streaming ingestion |
+| `pyproject.toml` | Added `pyarrow` dependency |
 
-Testing & Benchmarks
-- Do new changes include unit tests for Rust and Python as appropriate? Are e2e tests added when crossing FFI?
-- Are seeds fixed, and tests assert equivalence (tick vs batch) where relevant?
-- Any performance-sensitive change comes with benchmark notes (Criterion or `pytest -m bench`).
+## Key Implementation Details
 
-Style & Maintenance
-- Rust code follows edition 2024 idioms; clippy clean or justified; formatted with rustfmt.
-- Python code follows PEP 8, with type hints in new/changed code.
-- Public APIs documented in code and/or `docs/` when architectural changes occur.
+### 1. ArrowTickSource (`tick_source.rs`)
+- Implements `TickSource` trait with `next()`, `peek()`, and `symbol_id()` methods
+- Wraps `ArrowArrayStreamReader` from Arrow FFI
+- Parses Arrow batches into `Tick` structs on-the-fly
+- Handles column name variations (e.g., `ts_exchange` vs `ts_event`)
 
-## Review Flow
-1. Identify the scope of change (core, FFI, Python) and read related tests first.
-2. Trace data flow across boundaries (tick ingestion -> engine -> strategy callbacks -> stats/trades). Validate determinism.
-3. Scan for potential perf regressions (loops, conversions, allocations). Suggest targeted benchmarks.
-4. Validate error handling and messages at the boundary.
-5. Confirm style/lints and test coverage. Request missing tests where needed.
+### 2. Engine Lazy Ingestion (`engine.rs`)
+- Added `sources: Vec<Box<dyn TickSource>>` field
+- `step()` now checks if any source has a tick ready before the next queued event
+- If source tick is earlier, it ingests and schedules `Tick` + `TickDelivery` events
+- Applies `feed_latency_ns` when `ts_local` is not provided (zero)
 
-## Suggested Comments (copy/paste)
-- Determinism: “Consider sorting keys or replacing HashMap with BTreeMap here to stabilize iteration order.”
-- Money safety: “Avoid f64 here; prefer fixed-point integer type consistent with the rest of the codebase.”
-- FFI overhead: “This per-tick Python call may dominate runtime in large backtests; can we batch or move loop into Rust?”
-- Error clarity: “Surface this as a Python ValueError with field name for easier debugging.”
-- Bench ask: “Please add a Criterion bench for X or a `pytest -m bench` microbench to quantify the change.”
+### 3. Python FFI (`arrow_utils.rs`)
+- Extracts Arrow stream via `_export_to_c` method (fallback for PyCapsule compatibility)
+- Handles ownership transfer to prevent double-free issues
 
+## Review Focus Areas
+
+Please pay special attention to:
+
+1. **Memory Safety** (`arrow_utils.rs`)
+   - Is the PyCapsule ownership handling correct?
+   - Are there potential use-after-free or double-free issues?
+
+2. **Determinism** (`engine.rs`)
+   - Does the lazy ingestion maintain the same deterministic ordering as pre-loading?
+   - Is the timestamp comparison logic correct for tie-breaking?
+
+3. **Error Handling**
+   - Are schema mismatches handled gracefully in `ArrowTickSource`?
+   - Should missing columns trigger a hard error or a default value?
+
+4. **Performance**
+   - Is the `peek()` + `next()` pattern efficient?
+   - Should we batch-ingest multiple ticks per `step()` call?
+
+5. **API Design**
+   - Is `add_tick_source()` the right API for the Engine?
+   - Should `run_arrow()` accept multiple streams?
+
+## Test Commands
+
+```bash
+# Rust unit tests
+cargo test -p backtester-core
+
+# Python E2E test
+source .venv/bin/activate
+PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin develop --release
+pytest python/tests/test_e2e_arrow_stream_ingestion_smoke.py -v
+
+# Benchmarks
+cargo bench -p backtester-core
+```
+
+## Benchmark Results
+
+| Benchmark | Mean Time | Throughput |
+|-----------|-----------|------------|
+| `bench_event_loop_1m_ticks` | 138.5 ms | ~7.2M ticks/sec |
+| `bench_orderbook_apply_l2_1m_updates` | 34.6 ms | ~28.9M updates/sec |
+
+## Related Documentation
+- `docs/PLAN.md` - Phase 5 roadmap
+- `docs/SPEC.md` - Technical specification
