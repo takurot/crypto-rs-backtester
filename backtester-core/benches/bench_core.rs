@@ -159,7 +159,11 @@ impl Strategy for LoadStrategy {
         }
     }
 
-    fn on_order_update(&mut self, _report: &backtester_core::types::OrderReport, _ctx: &mut Context<'_>) {
+    fn on_order_update(
+        &mut self,
+        _report: &backtester_core::types::OrderReport,
+        _ctx: &mut Context<'_>,
+    ) {
         // No-op: this strategy only loads submission path.
     }
 }
