@@ -48,6 +48,7 @@ fn test_multi_venue_event_ordering_by_ts_sim() {
         mode: EngineMode::Tick,
         max_batch_ns: 0,
         seed: 42,
+        ..Default::default()
     };
     let latency = ConstantLatency {
         feed_latency_ns: 0,
@@ -152,6 +153,7 @@ fn test_arbitrage_two_venues_smoke() {
         mode: EngineMode::Tick,
         max_batch_ns: 0,
         seed: 42,
+        ..Default::default()
     };
     let latency = ConstantLatency {
         feed_latency_ns: 0,
@@ -239,6 +241,7 @@ fn test_multi_venue_l2_updates_do_not_leak_between_symbols() {
         mode: EngineMode::Tick,
         max_batch_ns: 0,
         seed: 42,
+        ..Default::default()
     };
     let latency = ConstantLatency {
         feed_latency_ns: 0,

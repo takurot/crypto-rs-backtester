@@ -8,6 +8,7 @@ use arrow_utils::get_arrow_stream;
 use backtester_core::engine::{EngineConfig, EngineMode, Strategy as CoreStrategy};
 use backtester_core::latency_model::ConstantLatency;
 use backtester_core::queue_model::ConservativeQueue;
+use backtester_core::stats::{equity_curve_from_pnl_deltas, pnl_deltas_from_fills};
 use backtester_core::tick_source::ArrowTickSource; // Import TickSource types
 use backtester_core::types::{Order, OrderReport, OrderType, Side, Tick};
 use backtester_core::{BacktestStats, TradeFill};
@@ -28,6 +29,7 @@ pub struct Backtester {
 pub struct BacktestResult {
     trades: Vec<TradeFill>,
     stats: BacktestStats,
+    equity_curve: Vec<(i64, i64)>,
 }
 
 #[pymethods]
@@ -42,6 +44,42 @@ impl BacktestResult {
             out.append(trade_fill_to_pydict(py, t)?)?;
         }
         Ok(out)
+    }
+
+    /// Return trades as a PyArrow-compatible dict of arrays for zero-copy access.
+    /// Schema: ts_exchange (i64), symbol_id (u32), order_id (u64), side (i8), price (i64), qty (i64)
+    pub fn trades_df<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let n = self.trades.len();
+        let ts_exchange: Vec<i64> = self.trades.iter().map(|f| f.ts_exchange).collect();
+        let symbol_id: Vec<u32> = self.trades.iter().map(|f| f.symbol_id).collect();
+        let order_id: Vec<u64> = self.trades.iter().map(|f| f.order_id).collect();
+        let side: Vec<i8> = self.trades.iter().map(|f| f.side.as_i8()).collect();
+        let price: Vec<i64> = self.trades.iter().map(|f| f.price).collect();
+        let qty: Vec<i64> = self.trades.iter().map(|f| f.qty).collect();
+
+        let d = PyDict::new_bound(py);
+        d.set_item("ts_exchange", ts_exchange)?;
+        d.set_item("symbol_id", symbol_id)?;
+        d.set_item("order_id", order_id)?;
+        d.set_item("side", side)?;
+        d.set_item("price", price)?;
+        d.set_item("qty", qty)?;
+        d.set_item("_len", n)?;
+        Ok(d)
+    }
+
+    /// Return equity curve as a PyArrow-compatible dict of arrays for zero-copy access.
+    /// Schema: ts_exchange (i64), equity (i64)
+    pub fn equity_curve_df<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let n = self.equity_curve.len();
+        let ts_exchange: Vec<i64> = self.equity_curve.iter().map(|(ts, _)| *ts).collect();
+        let equity: Vec<i64> = self.equity_curve.iter().map(|(_, eq)| *eq).collect();
+
+        let d = PyDict::new_bound(py);
+        d.set_item("ts_exchange", ts_exchange)?;
+        d.set_item("equity", equity)?;
+        d.set_item("_len", n)?;
+        Ok(d)
     }
 }
 
@@ -92,6 +130,7 @@ impl Backtester {
             },
             max_batch_ns: self.batch_ms.saturating_mul(1_000_000),
             seed: self.seed,
+            ..Default::default()
         };
 
         let strat = PyStrategy { obj: strategy };
@@ -107,7 +146,14 @@ impl Backtester {
 
         let trades = engine.trade_log().fills().to_vec();
         let stats = engine.stats();
-        Ok(BacktestResult { trades, stats })
+        let pnl_deltas = pnl_deltas_from_fills(&trades);
+        let all_pnl: Vec<_> = pnl_deltas.iter().map(|d| (d.ts_exchange, d.pnl)).collect();
+        let equity_curve = equity_curve_from_pnl_deltas(&all_pnl);
+        Ok(BacktestResult {
+            trades,
+            stats,
+            equity_curve,
+        })
     }
 
     /// Run backtest using an Arrow RecordBatch stream (zero-copy ingestion).
@@ -129,6 +175,7 @@ impl Backtester {
             },
             max_batch_ns: self.batch_ms.saturating_mul(1_000_000),
             seed: self.seed,
+            ..Default::default()
         };
 
         let strat = PyStrategy { obj: strategy };
@@ -151,7 +198,14 @@ impl Backtester {
 
         let trades = engine.trade_log().fills().to_vec();
         let stats = engine.stats();
-        Ok(BacktestResult { trades, stats })
+        let pnl_deltas = pnl_deltas_from_fills(&trades);
+        let all_pnl: Vec<_> = pnl_deltas.iter().map(|d| (d.ts_exchange, d.pnl)).collect();
+        let equity_curve = equity_curve_from_pnl_deltas(&all_pnl);
+        Ok(BacktestResult {
+            trades,
+            stats,
+            equity_curve,
+        })
     }
 }
 

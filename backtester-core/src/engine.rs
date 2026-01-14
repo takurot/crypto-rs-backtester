@@ -9,7 +9,7 @@ use crate::exchange_simulator::ExchangeSimulator;
 use crate::latency_model::LatencyModel;
 use crate::queue_model::QueueModel;
 use crate::rng::make_small_rng;
-use crate::stats::{BacktestStats, TradeFill, TradeLog, calculate_stats};
+use crate::stats::{BacktestStats, TradeFill, TradeLog, TradeLogMode, calculate_stats};
 use crate::types::{FundingEvent, Order, OrderReport, Tick, TsLocalNs, TsSimNs};
 use rand::rngs::SmallRng;
 
@@ -31,6 +31,8 @@ pub struct EngineConfig {
     pub max_batch_ns: i64,
     /// RNG seed for all stochastic components owned by the engine.
     pub seed: u64,
+    /// Trade log retention mode (Phase 5.4).
+    pub trade_log_mode: TradeLogMode,
 }
 
 impl Default for EngineConfig {
@@ -41,6 +43,7 @@ impl Default for EngineConfig {
             mode: EngineMode::Tick,
             max_batch_ns: 0,
             seed: 0,
+            trade_log_mode: TradeLogMode::All,
         }
     }
 }
@@ -167,7 +170,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             latency_model,
             rng: make_small_rng(config.seed),
             account: Account::default(),
-            trade_log: TradeLog::default(),
+            trade_log: TradeLog::new(config.trade_log_mode),
             market: MarketView::default(),
             truth_last_trade_by_symbol: BTreeMap::new(),
             next_event_seq: 0,
@@ -574,6 +577,7 @@ mod tests {
             mode: EngineMode::Tick,
             max_batch_ns: 0,
             seed: 42,
+            ..Default::default()
         };
 
         let strategy = RecordingStrategy::default();
@@ -630,6 +634,7 @@ mod tests {
             mode: EngineMode::Tick,
             max_batch_ns: 0,
             seed: 42,
+            ..Default::default()
         };
         let strategy = NoopStrategy;
         let latency_model = ConstantLatency {
@@ -672,6 +677,7 @@ mod tests {
             mode: EngineMode::Tick,
             max_batch_ns: 0,
             seed: 42,
+            ..Default::default()
         };
         let strategy = RecordingStrategy::default();
         let latency_model = ConstantLatency {
@@ -735,6 +741,7 @@ mod tests {
             mode: EngineMode::Tick,
             max_batch_ns: 0,
             seed: 42,
+            ..Default::default()
         };
         let strategy = RecordingStrategy::default();
         let mut eng = Engine::new(
@@ -840,6 +847,7 @@ mod tests {
             mode: EngineMode::Tick,
             max_batch_ns: 0,
             seed: 42,
+            ..Default::default()
         };
         let t0 = fixtures::tick_trade(1_000, 1_000, 0);
         let t1 = Tick {

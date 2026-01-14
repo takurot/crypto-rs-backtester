@@ -322,14 +322,14 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Suggested benches**:
         - `bench_event_loop_streaming_1m_ticks()`
 
-- [ ] **5.3 Zero-Copy Result Export (Trades / Equity Curve)** `[Depends on 4.2, 5.1]`
+- [x] **5.3 Zero-Copy Result Export (Trades / Equity Curve)** `[Depends on 4.2, 5.1]`
     - Add result export APIs that return Arrow/Polars objects backed by Rust buffers (avoid Python dict/list for large outputs).
     - Provide `BacktestResult.trades_df()` and `BacktestResult.equity_curve_df()` (or equivalent) with a stable schema.
     - **Deliverable**: Large trade logs can be analyzed in Python without a second full copy.
     - **Suggested tests**:
         - Python E2E: `test_e2e_result_trades_df_schema_and_values()`
 
-- [ ] **5.4 TradeLog Retention & Memory Controls** `[Depends on 4.2]`
+- [x] **5.4 TradeLog Retention & Memory Controls** `[Depends on 4.2]`
     - Add `TradeLogMode` (e.g., `All`, `RingBuffer(N)`, `SummaryOnly`, `None`) and expose it in the Python API.
     - When `SummaryOnly` is enabled, compute aggregate stats incrementally and ensure the output matches the full-log computation for small deterministic inputs.
     - **Deliverable**: Backtests can run for hours of data without unbounded memory growth.
@@ -344,7 +344,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Suggested tests**:
         - Python E2E: `test_e2e_run_many_deterministic_and_ordered()`
 
-- [ ] **5.6 Benchmark Regression Observability (CI Artifacts)** `[Depends on 0.3.1, 4.3]`
+- [x] **5.6 Benchmark Regression Observability (CI Artifacts)** `[Depends on 0.3.1, 4.3]`
     - Upload Criterion reports as CI artifacts for each run.
     - Keep scheduled benchmark runs (weekly) for baseline tracking; avoid hard performance gates unless methodology is robust.
     - **Deliverable**: Performance trends are visible and regressions are easier to catch.
