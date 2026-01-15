@@ -51,10 +51,10 @@ pub struct TradeLog {
     mode: TradeLogMode,
     fills: Vec<TradeFill>,
     fills_ring: VecDeque<TradeFill>,
-    /// We keep Funding events in history/ring? 
-    /// For simplicity, store *all* PnL events (trade deltas + funding) in a simplified log 
+    /// We keep Funding events in history/ring?
+    /// For simplicity, store *all* PnL events (trade deltas + funding) in a simplified log
     /// for accurate Equity Curve / MaxDD even if fills are dropped.
-    pnl_history: Vec<(TsExchangeNs, i64)>, 
+    pnl_history: Vec<(TsExchangeNs, i64)>,
     /// Incremental stats for SummaryOnly / RingBuffer modes.
     incremental: IncrementalStats,
 }
@@ -107,16 +107,16 @@ impl TradeLog {
     pub fn push_pnl_event(&mut self, event: PnlEvent) {
         // PnlEvent (Funding) is also a PnL entry.
         if self.mode != TradeLogMode::None {
-             if self.mode != TradeLogMode::SummaryOnly {
-                 // For All/RingBuffer, we might want to keep explicit PnlEvent objects if needed.
-                 // But for stats, `pnl_history` is sufficient. 
-                 // If we need to export "Funding Events" specifically, we might need a vector for them.
-                 // Given the review, let's focus on Correct Stats first.
-                 // We will simply append to pnl_history.
-                 // Note: If we need strictly "Funding Events" list, we might need `pnl_events` vec back.
-                 // Let's keep `pnl_history` as the Source of Truth for PnL.
-             }
-             self.pnl_history.push((event.ts_exchange, event.pnl));
+            if self.mode != TradeLogMode::SummaryOnly {
+                // For All/RingBuffer, we might want to keep explicit PnlEvent objects if needed.
+                // But for stats, `pnl_history` is sufficient.
+                // If we need to export "Funding Events" specifically, we might need a vector for them.
+                // Given the review, let's focus on Correct Stats first.
+                // We will simply append to pnl_history.
+                // Note: If we need strictly "Funding Events" list, we might need `pnl_events` vec back.
+                // Let's keep `pnl_history` as the Source of Truth for PnL.
+            }
+            self.pnl_history.push((event.ts_exchange, event.pnl));
         }
         self.update_incremental_pnl(event.pnl);
     }
@@ -130,8 +130,10 @@ impl TradeLog {
     }
 
     fn update_incremental_pnl(&mut self, pnl: i64) {
-        if self.mode == TradeLogMode::None { return; }
-        
+        if self.mode == TradeLogMode::None {
+            return;
+        }
+
         self.incremental.total_pnl = self.incremental.total_pnl.saturating_add(pnl);
         if pnl > 0 {
             self.incremental.gross_profit = self.incremental.gross_profit.saturating_add(pnl);
@@ -437,7 +439,10 @@ pub fn calculate_stats(trade_log: &TradeLog) -> BacktestStats {
     let inc = trade_log.incremental_stats();
 
     // If we have no pnl history (SummaryOnly or None), return incremental-derived stats.
-    if trade_log.mode() == TradeLogMode::SummaryOnly || trade_log.mode() == TradeLogMode::None || trade_log.pnl_history().is_empty() {
+    if trade_log.mode() == TradeLogMode::SummaryOnly
+        || trade_log.mode() == TradeLogMode::None
+        || trade_log.pnl_history().is_empty()
+    {
         let win_rate = if inc.total_trades > 0 {
             inc.win_count as f64 / inc.total_trades as f64
         } else {
@@ -467,7 +472,7 @@ pub fn calculate_stats(trade_log: &TradeLog) -> BacktestStats {
             calmar_ratio: 0.0,
             total_pnl: inc.total_pnl,
             avg_trade_pnl,
-            avg_holding_period: 0, 
+            avg_holding_period: 0,
             total_fees_paid: 0,
         };
     }
@@ -493,7 +498,6 @@ pub fn calculate_stats(trade_log: &TradeLog) -> BacktestStats {
     let mut gross_profit: i64 = 0;
     let mut gross_loss: i64 = 0;
     let mut pnl_series: Vec<i64> = Vec::with_capacity(all_pnl_deltas.len());
-    let mut win_count = 0;
 
     for (_ts, d) in &all_pnl_deltas {
         total_pnl = total_pnl.saturating_add(*d);
@@ -505,7 +509,7 @@ pub fn calculate_stats(trade_log: &TradeLog) -> BacktestStats {
         }
     }
 
-    win_count = inc.win_count; // Use incremental logic for consistency
+    let win_count = inc.win_count; // Use incremental logic for consistency
 
     let curve = equity_curve_from_pnl_deltas(&all_pnl_deltas);
     let (max_dd_pct, max_dd_dur) = max_drawdown_pct_and_duration(&curve);
@@ -593,7 +597,7 @@ mod tests {
             log.push_fill(f);
         }
         // Manually push PnL delta (simulating Engine)
-        log.push_pnl_delta(2_000, 1_00000000); 
+        log.push_pnl_delta(2_000, 1_00000000);
 
         let stats = calculate_stats(&log);
         assert_eq!(stats.total_pnl, 1_00000000);

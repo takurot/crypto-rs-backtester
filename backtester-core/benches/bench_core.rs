@@ -6,7 +6,7 @@ use backtester_core::latency_model::ConstantLatency;
 use backtester_core::queue_model::ConservativeQueue;
 use backtester_core::tick_source::TickSource;
 use backtester_core::types::{Order, OrderType, Tick};
-use backtester_core::{EventKind, EventQueue, OrderBookL2, Side, fixtures};
+use backtester_core::{EventKind, EventQueue, OrderBookL2, Side, TradeLogMode, fixtures};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 fn bench_event_loop_1m_ticks(c: &mut Criterion) {
@@ -217,6 +217,7 @@ fn bench_engine_e2e_multisymbol_tick(c: &mut Criterion) {
                 mode: EngineMode::Tick,
                 max_batch_ns: 0,
                 seed: 42,
+                trade_log_mode: TradeLogMode::All,
             };
             let latency_model = ConstantLatency {
                 feed_latency_ns: cfg.feed_latency_ns,
@@ -259,6 +260,7 @@ fn bench_engine_e2e_multisymbol_batch(c: &mut Criterion) {
                 mode: EngineMode::Batch,
                 max_batch_ns,
                 seed: 42,
+                trade_log_mode: TradeLogMode::All,
             };
             let latency_model = ConstantLatency {
                 feed_latency_ns: cfg.feed_latency_ns,

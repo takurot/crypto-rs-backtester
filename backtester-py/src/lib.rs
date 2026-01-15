@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 mod arrow_utils;
 
+use arrow::array::{ArrayRef, Int8Builder, Int64Builder, UInt32Builder, UInt64Builder};
+use arrow::pyarrow::ToPyArrow;
 use arrow_utils::get_arrow_stream;
 use backtester_core::engine::{EngineConfig, EngineMode, Strategy as CoreStrategy};
 use backtester_core::latency_model::ConstantLatency;
@@ -16,8 +18,6 @@ use backtester_core::{Context as CoreContext, Engine, EventKind};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule};
 use rayon::prelude::*;
-use arrow::array::{ArrayRef, Int64Builder, Int8Builder, UInt32Builder, UInt64Builder};
-use arrow::pyarrow::ToPyArrow;
 use std::sync::Arc;
 
 #[pyclass]
@@ -52,12 +52,11 @@ impl BacktestResult {
         Ok(out)
     }
 
-
     /// Return trades as a PyArrow-compatible dict of arrays for zero-copy access.
     /// Schema: ts_exchange (i64), symbol_id (u32), order_id (u64), side (i8), price (i64), qty (i64)
     pub fn trades_df<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let n = self.trades.len();
-        
+
         let mut ts_builder = Int64Builder::with_capacity(n);
         let mut symbol_builder = UInt32Builder::with_capacity(n);
         let mut order_builder = UInt64Builder::with_capacity(n);
@@ -96,7 +95,7 @@ impl BacktestResult {
     /// Schema: ts_exchange (i64), equity (i64)
     pub fn equity_curve_df<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let n = self.equity_curve.len();
-        
+
         let mut ts_builder = Int64Builder::with_capacity(n);
         let mut equity_builder = Int64Builder::with_capacity(n);
 
@@ -114,7 +113,8 @@ impl BacktestResult {
         d.set_item("_len", n)?;
         Ok(d)
     }
-}#[pymethods]
+}
+#[pymethods]
 impl Backtester {
     #[new]
     #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=0, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all"))]
@@ -194,7 +194,11 @@ impl Backtester {
         let stats = engine.stats();
         let all_pnl = full_pnl_history(engine.trade_log());
         let equity_curve = equity_curve_from_pnl_deltas(&all_pnl);
-        Ok(BacktestResult { trades, stats, equity_curve })
+        Ok(BacktestResult {
+            trades,
+            stats,
+            equity_curve,
+        })
     }
 
     /// Run multiple backtests in parallel.
@@ -208,33 +212,39 @@ impl Backtester {
     /// The seed for each run is derived deterministically: `self.seed + index`.
     /// Data is parsed once and shared across runs (zero-copy for the engine, but cloned Ticks for queue).
     #[pyo3(signature = (strategies))]
-    pub fn run_many(&self, py: Python<'_>, strategies: Vec<Py<PyAny>>) -> PyResult<Vec<BacktestResult>> {
+    pub fn run_many(
+        &self,
+        py: Python<'_>,
+        strategies: Vec<Py<PyAny>>,
+    ) -> PyResult<Vec<BacktestResult>> {
         // 1. Pre-load data to avoid GIL during parallel execution setup.
         let events = parse_polars_data(py, &self.data, self.feed_latency_ns)?;
-        
+
         // 2. Prepare configurations for each run.
         let n = strategies.len();
-        
-        let configs: Vec<EngineConfig> = (0..n).map(|i| {
-             EngineConfig {
-                feed_latency_ns: self.feed_latency_ns,
-                order_update_latency_ns: self.feed_latency_ns,
-                mode: match self.python_mode.as_str() {
-                    "batch" => EngineMode::Batch,
-                    _ => EngineMode::Tick,
-                },
-                max_batch_ns: self.batch_ms.saturating_mul(1_000_000),
-                // Deterministic seed derivation
-                seed: self.seed.wrapping_add(i as u64),
-                trade_log_mode: match self.trade_log_mode.to_lowercase().as_str() {
-                    "all" => TradeLogMode::All,
-                    "summaryonly" => TradeLogMode::SummaryOnly,
-                    "none" => TradeLogMode::None,
-                    s if s.starts_with("ringbuffer") => TradeLogMode::RingBuffer(10000),
-                    _ => TradeLogMode::All,
-                },
-            }
-        }).collect();
+
+        let configs: Vec<EngineConfig> = (0..n)
+            .map(|i| {
+                EngineConfig {
+                    feed_latency_ns: self.feed_latency_ns,
+                    order_update_latency_ns: self.feed_latency_ns,
+                    mode: match self.python_mode.as_str() {
+                        "batch" => EngineMode::Batch,
+                        _ => EngineMode::Tick,
+                    },
+                    max_batch_ns: self.batch_ms.saturating_mul(1_000_000),
+                    // Deterministic seed derivation
+                    seed: self.seed.wrapping_add(i as u64),
+                    trade_log_mode: match self.trade_log_mode.to_lowercase().as_str() {
+                        "all" => TradeLogMode::All,
+                        "summaryonly" => TradeLogMode::SummaryOnly,
+                        "none" => TradeLogMode::None,
+                        s if s.starts_with("ringbuffer") => TradeLogMode::RingBuffer(10000),
+                        _ => TradeLogMode::All,
+                    },
+                }
+            })
+            .collect();
 
         let latency_ns = self.feed_latency_ns;
 
@@ -257,7 +267,7 @@ impl Backtester {
                     for (ts, kind) in &events {
                         engine.push_event(*ts, kind.clone());
                     }
-                     
+
                     engine.run();
 
                     let trades = engine.trade_log().fills_vec();
@@ -268,12 +278,16 @@ impl Backtester {
                     // It is imported at top of file.
                     let all_pnl = full_pnl_history(engine.trade_log());
                     let equity_curve = equity_curve_from_pnl_deltas(&all_pnl);
-                    
-                    Ok(BacktestResult { trades, stats, equity_curve })
+
+                    Ok(BacktestResult {
+                        trades,
+                        stats,
+                        equity_curve,
+                    })
                 })
                 .collect()
         });
-        
+
         results.map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
     }
 
@@ -327,7 +341,11 @@ impl Backtester {
         let stats = engine.stats();
         let all_pnl = full_pnl_history(engine.trade_log());
         let equity_curve = equity_curve_from_pnl_deltas(&all_pnl);
-        Ok(BacktestResult { trades, stats, equity_curve })
+        Ok(BacktestResult {
+            trades,
+            stats,
+            equity_curve,
+        })
     }
 }
 
