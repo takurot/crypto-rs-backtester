@@ -308,7 +308,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             EventKind::Tick(tick) => {
                 self.truth_last_trade_by_symbol.insert(tick.symbol_id, tick);
                 // Market truth drives the exchange simulator only.
-                let mut fills: Vec<(Order, i64)> = Vec::new();
+                let mut fills: Vec<(Order, i64, i64)> = Vec::new();
                 let mut trade_fills: Vec<TradeFill> = Vec::new();
                 let reports = {
                     // Scope the mutable borrow of `self.exchanges` to avoid borrow conflicts.
@@ -318,7 +318,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                         if r.last_fill_qty > 0
                             && let Some(order) = ex.get_order(r.order_id)
                         {
-                            fills.push((order, r.last_fill_qty));
+                            fills.push((order, r.last_fill_qty, r.last_fill_price));
                             trade_fills.push(TradeFill {
                                 ts_exchange: tick.ts_exchange,
                                 symbol_id: r.symbol_id,
@@ -336,8 +336,9 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                     self.trade_log.push_fill(f);
                 }
 
-                for (order, fill_qty) in fills {
-                    self.account.on_fill(&order, fill_qty);
+                for (order, fill_qty, fill_price) in fills {
+                    let pnl_delta = self.account.on_fill(&order, fill_qty, fill_price);
+                    self.trade_log.push_pnl_delta(tick.ts_exchange, pnl_delta);
                 }
 
                 let ts_delivery = tick.ts_exchange + self.config.order_update_latency_ns;

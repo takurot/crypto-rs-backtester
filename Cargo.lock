@@ -347,6 +347,7 @@ dependencies = [
  "log",
  "polars",
  "rand",
+ "rayon",
  "rust_decimal",
  "serde",
  "thiserror",
@@ -359,6 +360,7 @@ dependencies = [
  "arrow",
  "backtester-core",
  "pyo3",
+ "rayon",
 ]
 
 [[package]]

@@ -11,6 +11,7 @@ log = { version = "0.4", optional = true }
 rust_decimal = { version = "1", optional = true }
 arrow = { version = "53", features = ["ffi"] }
 polars = { version = "0.40", optional = true }
+rayon = "1.11.0"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
