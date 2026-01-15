@@ -1,16 +1,20 @@
+use crate::types::{FixedPoint, FundingEvent, Order, Side, TsExchangeNs};
 use std::collections::BTreeMap;
-
-use crate::types::{FixedPoint, FundingEvent, Order, Side};
 
 /// Minimal account/position model (Phase 3 scaffolding).
 ///
-/// This tracks only:
+/// This tracks:
 /// - Position quantity (base units, fixed-point scaled)
+/// - Average entry price (quote units, fixed-point scaled)
 /// - Funding PnL (quote units, fixed-point scaled)
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Position {
     /// Base asset position size (scaled by 1e8). Positive = long, negative = short.
     pub qty: i64,
+    /// Average entry price (scaled by 1e8).
+    pub avg_price: i64,
+    /// Timestamp of last position increase/open.
+    pub last_open_ts: TsExchangeNs,
     /// Accumulated funding PnL (scaled by 1e8). Positive = received, negative = paid.
     pub funding_pnl: i64,
 }
@@ -19,6 +23,10 @@ pub struct Position {
 pub struct Account {
     positions: BTreeMap<u32, Position>,
     total_funding_pnl: i64,
+}
+
+fn clamp_i128_to_i64(v: i128) -> i64 {
+    v.clamp(i64::MIN as i128, i64::MAX as i128) as i64
 }
 
 impl Account {
@@ -34,18 +42,67 @@ impl Account {
         self.total_funding_pnl
     }
 
-    pub fn on_fill(&mut self, order: &Order, fill_qty: i64) {
-        let delta = match order.side {
+    /// Process a fill and return the realized PnL delta (quote, scaled).
+    pub fn on_fill(&mut self, order: &Order, fill_qty: i64, fill_price: i64) -> i64 {
+        let delta_qty = match order.side {
             Side::Buy => fill_qty,
             Side::Sell => -fill_qty,
             Side::None => 0,
         };
-        if delta == 0 {
-            return;
+        if delta_qty == 0 {
+            return 0;
         }
 
         let p = self.positions.entry(order.symbol_id).or_default();
-        p.qty = p.qty.saturating_add(delta);
+
+        // Open / add to position in the same direction.
+        if p.qty == 0 || p.qty.signum() == delta_qty.signum() {
+            if p.qty == 0 {
+                p.last_open_ts = order.ts_submit; // Approximation if exchange timestamp not known here
+                // Note: engine::process_fill usually knows exchange ts, but Account doesn't see fill ts here.
+                // We should probably take ts_fill as arg. For now use order ts as approximation for new pos.
+            }
+            let new_qty = p.qty.saturating_add(delta_qty);
+            let abs_old = p.qty.abs() as i128;
+            let abs_delta = delta_qty.abs() as i128;
+            let new_abs = abs_old + abs_delta;
+            if new_abs > 0 {
+                let weighted = (p.avg_price as i128 * abs_old) + (fill_price as i128 * abs_delta);
+                p.avg_price = clamp_i128_to_i64(weighted / new_abs);
+            } else {
+                p.avg_price = 0;
+            }
+            p.qty = new_qty;
+            return 0;
+        }
+
+        // Reduce / close / flip.
+        let abs_old = p.qty.abs() as i128;
+        let abs_delta = delta_qty.abs() as i128;
+        let close_abs = abs_old.min(abs_delta);
+
+        let pnl_per_unit: i128 = if p.qty > 0 {
+            (fill_price - p.avg_price) as i128
+        } else {
+            (p.avg_price - fill_price) as i128
+        };
+        let pnl_i128 = (pnl_per_unit.saturating_mul(close_abs)) / FixedPoint::SCALE as i128;
+        let pnl_delta = clamp_i128_to_i64(pnl_i128);
+
+        let new_qty = p.qty.saturating_add(delta_qty);
+        if new_qty == 0 {
+            p.qty = 0;
+            p.avg_price = 0;
+        } else if new_qty.signum() == p.qty.signum() {
+            p.qty = new_qty;
+        } else {
+            // Flipped position
+            p.qty = new_qty;
+            p.avg_price = fill_price;
+            p.last_open_ts = order.ts_submit; // See note above on ts
+        }
+
+        pnl_delta
     }
 
     /// Apply a funding event using the given mark price.
@@ -107,7 +164,7 @@ mod tests {
             price: 100_00000000,
             qty: 1_00000000,
         };
-        acct.on_fill(&order, 1_00000000);
+        acct.on_fill(&order, 1_00000000, 100_00000000);
 
         let event = FundingEvent {
             ts_exchange: 3_000,

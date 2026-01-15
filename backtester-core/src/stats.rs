@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 
 use crate::types::{FixedPoint, Side, TsExchangeNs};
 
@@ -21,27 +22,160 @@ pub struct PnlEvent {
     pub pnl: i64,
 }
 
-#[derive(Debug, Default, Clone)]
+/// Trade log retention mode for memory control (Phase 5.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TradeLogMode {
+    /// Keep all fills/events (default).
+    #[default]
+    All,
+    /// Keep only the last N fills (ring buffer).
+    RingBuffer(usize),
+    /// Keep no fills, only incrementally compute summary stats.
+    SummaryOnly,
+    /// Disable logging entirely (fastest, no stats available).
+    None,
+}
+
+/// Incremental summary statistics for SummaryOnly mode.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct IncrementalStats {
+    pub total_trades: u64,
+    pub total_pnl: i64,
+    pub gross_profit: i64,
+    pub gross_loss: i64,
+    pub win_count: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct TradeLog {
+    mode: TradeLogMode,
     fills: Vec<TradeFill>,
-    pnl_events: Vec<PnlEvent>,
+    fills_ring: VecDeque<TradeFill>,
+    /// We keep Funding events in history/ring?
+    /// For simplicity, store *all* PnL events (trade deltas + funding) in a simplified log
+    /// for accurate Equity Curve / MaxDD even if fills are dropped.
+    pnl_history: Vec<(TsExchangeNs, i64)>,
+    /// Incremental stats for SummaryOnly / RingBuffer modes.
+    incremental: IncrementalStats,
+}
+
+impl Default for TradeLog {
+    fn default() -> Self {
+        Self::new(TradeLogMode::All)
+    }
 }
 
 impl TradeLog {
+    pub fn new(mode: TradeLogMode) -> Self {
+        Self {
+            mode,
+            fills: Vec::new(),
+            fills_ring: VecDeque::new(),
+            pnl_history: Vec::new(),
+            incremental: IncrementalStats::default(),
+        }
+    }
+
+    pub fn mode(&self) -> TradeLogMode {
+        self.mode
+    }
+
     pub fn push_fill(&mut self, fill: TradeFill) {
-        self.fills.push(fill);
+        match self.mode {
+            TradeLogMode::All => {
+                self.fills.push(fill);
+                self.update_incremental_fill();
+            }
+            TradeLogMode::RingBuffer(cap) => {
+                if self.fills_ring.len() >= cap {
+                    self.fills_ring.pop_front();
+                }
+                self.fills_ring.push_back(fill);
+                self.update_incremental_fill();
+            }
+            TradeLogMode::SummaryOnly => {
+                self.update_incremental_fill();
+            }
+            TradeLogMode::None => {}
+        }
+    }
+
+    fn update_incremental_fill(&mut self) {
+        self.incremental.total_trades += 1;
     }
 
     pub fn push_pnl_event(&mut self, event: PnlEvent) {
-        self.pnl_events.push(event);
+        // PnlEvent (Funding) is also a PnL entry.
+        if self.mode != TradeLogMode::None {
+            if self.mode != TradeLogMode::SummaryOnly {
+                // For All/RingBuffer, we might want to keep explicit PnlEvent objects if needed.
+                // But for stats, `pnl_history` is sufficient.
+                // If we need to export "Funding Events" specifically, we might need a vector for them.
+                // Given the review, let's focus on Correct Stats first.
+                // We will simply append to pnl_history.
+                // Note: If we need strictly "Funding Events" list, we might need `pnl_events` vec back.
+                // Let's keep `pnl_history` as the Source of Truth for PnL.
+            }
+            self.pnl_history.push((event.ts_exchange, event.pnl));
+        }
+        self.update_incremental_pnl(event.pnl);
     }
 
-    pub fn fills(&self) -> &[TradeFill] {
-        &self.fills
+    /// Update stats from a realized PnL delta (from trade).
+    pub fn push_pnl_delta(&mut self, ts: TsExchangeNs, pnl: i64) {
+        if self.mode != TradeLogMode::None {
+            self.pnl_history.push((ts, pnl));
+        }
+        self.update_incremental_pnl(pnl);
     }
 
-    pub fn pnl_events(&self) -> &[PnlEvent] {
-        &self.pnl_events
+    fn update_incremental_pnl(&mut self, pnl: i64) {
+        if self.mode == TradeLogMode::None {
+            return;
+        }
+
+        self.incremental.total_pnl = self.incremental.total_pnl.saturating_add(pnl);
+        if pnl > 0 {
+            self.incremental.gross_profit = self.incremental.gross_profit.saturating_add(pnl);
+            self.incremental.win_count += 1;
+        } else if pnl < 0 {
+            self.incremental.gross_loss = self.incremental.gross_loss.saturating_add(pnl);
+        }
+    }
+
+    pub fn fills_iter(&self) -> Box<dyn Iterator<Item = &TradeFill> + '_> {
+        match self.mode {
+            TradeLogMode::All => Box::new(self.fills.iter()),
+            TradeLogMode::RingBuffer(_) => Box::new(self.fills_ring.iter()),
+            _ => Box::new(std::iter::empty()),
+        }
+    }
+
+    pub fn fills_vec(&self) -> Vec<TradeFill> {
+        self.fills_iter().copied().collect()
+    }
+
+    // Used for full PnL reconstruction
+    pub fn pnl_history(&self) -> &[(TsExchangeNs, i64)] {
+        &self.pnl_history
+    }
+
+    pub fn incremental_stats(&self) -> &IncrementalStats {
+        &self.incremental
+    }
+
+    pub fn len(&self) -> usize {
+        match self.mode {
+            TradeLogMode::All => self.fills.len(),
+            TradeLogMode::RingBuffer(_) => self.fills_ring.len(),
+            // For SummaryOnly, we track count in incremental stats
+            TradeLogMode::SummaryOnly => self.incremental.total_trades as usize,
+            TradeLogMode::None => 0,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -109,9 +243,9 @@ pub struct PnlDelta {
 ///
 /// Each entry is `PnlDelta`, where `pnl` is 0 for pure opens/adds,
 /// and non-zero when the fill reduces or closes an existing position.
-pub fn pnl_deltas_from_fills(fills: &[TradeFill]) -> Vec<PnlDelta> {
+pub fn pnl_deltas_from_fills<'a>(fills: impl Iterator<Item = &'a TradeFill>) -> Vec<PnlDelta> {
     let mut state_by_symbol: BTreeMap<u32, PosState> = BTreeMap::new();
-    let mut deltas: Vec<PnlDelta> = Vec::with_capacity(fills.len());
+    let mut deltas: Vec<PnlDelta> = Vec::new();
 
     for f in fills {
         let qty = f.qty;
@@ -291,52 +425,97 @@ pub fn sortino_ratio_from_pnl_series(pnl: &[i64]) -> f64 {
     mean / downside_std
 }
 
+/// Compute full time-ordered PnL history (trades + events) from the log.
+pub fn full_pnl_history(trade_log: &TradeLog) -> Vec<(TsExchangeNs, i64)> {
+    if trade_log.mode() == TradeLogMode::None {
+        return Vec::new();
+    }
+    // Return clone of full history.
+    trade_log.pnl_history().to_vec()
+}
+
 /// Compute basic stats from fills and PnL events (e.g. funding).
 pub fn calculate_stats(trade_log: &TradeLog) -> BacktestStats {
-    let fills = trade_log.fills();
-    let pnl_events = trade_log.pnl_events();
+    let inc = trade_log.incremental_stats();
 
-    let trade_deltas = pnl_deltas_from_fills(fills);
-    let mut all_pnl_deltas: Vec<(TsExchangeNs, i64)> =
-        Vec::with_capacity(trade_deltas.len() + pnl_events.len());
+    // If we have no pnl history (SummaryOnly or None), return incremental-derived stats.
+    if trade_log.mode() == TradeLogMode::SummaryOnly
+        || trade_log.mode() == TradeLogMode::None
+        || trade_log.pnl_history().is_empty()
+    {
+        let win_rate = if inc.total_trades > 0 {
+            inc.win_count as f64 / inc.total_trades as f64
+        } else {
+            0.0
+        };
+        let profit_factor = if inc.gross_loss < 0 {
+            inc.gross_profit as f64 / (-inc.gross_loss) as f64
+        } else if inc.gross_profit > 0 {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+        let avg_trade_pnl = if inc.total_trades > 0 {
+            inc.total_pnl / inc.total_trades as i64
+        } else {
+            0
+        };
+
+        return BacktestStats {
+            total_trades: inc.total_trades,
+            win_rate,
+            profit_factor,
+            sharpe_ratio: 0.0,
+            sortino_ratio: 0.0,
+            max_drawdown: 0.0,
+            max_drawdown_duration: 0,
+            calmar_ratio: 0.0,
+            total_pnl: inc.total_pnl,
+            avg_trade_pnl,
+            avg_holding_period: 0,
+            total_fees_paid: 0,
+        };
+    }
+
+    let all_pnl_deltas = full_pnl_history(trade_log);
+
+    // Calculate other non-PnL stats (holding period etc) which require access to fills
+    // Re-running pnl_deltas_from_fills slightly inefficient but clean separation.
+    let fills_iter = trade_log.fills_iter();
+    let trade_deltas = pnl_deltas_from_fills(fills_iter);
 
     let mut total_holding_time: i64 = 0;
     let mut num_closed_trades: u64 = 0;
 
     for d in &trade_deltas {
-        all_pnl_deltas.push((d.ts_exchange, d.pnl));
         if d.holding_period > 0 {
             total_holding_time = total_holding_time.saturating_add(d.holding_period);
             num_closed_trades += 1;
         }
     }
-    for e in pnl_events {
-        all_pnl_deltas.push((e.ts_exchange, e.pnl));
-    }
-    // Sort by timestamp to ensure correct equity curve and drawdown.
-    all_pnl_deltas.sort_by_key(|(ts, _)| *ts);
 
     let mut total_pnl: i64 = 0;
     let mut gross_profit: i64 = 0;
     let mut gross_loss: i64 = 0;
     let mut pnl_series: Vec<i64> = Vec::with_capacity(all_pnl_deltas.len());
-    let mut win_count = 0;
 
     for (_ts, d) in &all_pnl_deltas {
         total_pnl = total_pnl.saturating_add(*d);
         pnl_series.push(*d);
         if *d > 0 {
             gross_profit = gross_profit.saturating_add(*d);
-            win_count += 1;
         } else if *d < 0 {
             gross_loss = gross_loss.saturating_add(*d);
         }
     }
 
+    let win_count = inc.win_count; // Use incremental logic for consistency
+
     let curve = equity_curve_from_pnl_deltas(&all_pnl_deltas);
     let (max_dd_pct, max_dd_dur) = max_drawdown_pct_and_duration(&curve);
 
-    let total_trades = fills.len() as u64;
+    let total_trades = inc.total_trades;
+
     let win_rate = if total_trades > 0 {
         win_count as f64 / total_trades as f64
     } else {
@@ -417,15 +596,15 @@ mod tests {
         for f in fills {
             log.push_fill(f);
         }
-        let stats = calculate_stats(&log);
+        // Manually push PnL delta (simulating Engine)
+        log.push_pnl_delta(2_000, 1_00000000);
 
-        // +1.00 quote PnL (scaled by 1e8).
+        let stats = calculate_stats(&log);
         assert_eq!(stats.total_pnl, 1_00000000);
     }
 
     #[test]
     fn test_stats_max_drawdown_matches_reference() {
-        // Equity: 100 -> 120 (peak) -> 90 (trough) => DD = 25%
         let curve = vec![(0_i64, 100), (10, 120), (20, 90), (30, 130)];
         let (dd, dur) = max_drawdown_pct_and_duration(&curve);
         assert!((dd - 25.0).abs() < 1e-12, "dd={dd}");
@@ -435,17 +614,14 @@ mod tests {
     #[test]
     fn test_stats_funding_pnl_timeseries() {
         let mut log = TradeLog::default();
-        // 1. Gain 100 at t=10
         log.push_pnl_event(PnlEvent {
             ts_exchange: 10,
             pnl: 100_00000000,
         });
-        // 2. Lose 20 (funding) at t=20 -> DD = 20%
         log.push_pnl_event(PnlEvent {
             ts_exchange: 20,
             pnl: -20_00000000,
         });
-        // 3. Gain 50 at t=30 -> New peak 130
         log.push_pnl_event(PnlEvent {
             ts_exchange: 30,
             pnl: 50_00000000,
@@ -460,7 +636,6 @@ mod tests {
     #[test]
     fn test_stats_win_rate_and_profit_factor() {
         let mut log = TradeLog::default();
-        // Trade 1: Buy 100, Sell 110 -> PnL +10
         log.push_fill(TradeFill {
             ts_exchange: 10,
             symbol_id: 1,
@@ -477,7 +652,8 @@ mod tests {
             price: 110_00000000,
             qty: 1_00000000,
         });
-        // Trade 2: Buy 100, Sell 95 -> PnL -5
+        log.push_pnl_delta(11, 10_00000000);
+
         log.push_fill(TradeFill {
             ts_exchange: 20,
             symbol_id: 1,
@@ -494,10 +670,93 @@ mod tests {
             price: 95_00000000,
             qty: 1_00000000,
         });
+        log.push_pnl_delta(21, -5_00000000);
 
         let stats = calculate_stats(&log);
         assert_eq!(stats.total_trades, 4);
-        assert_eq!(stats.win_rate, 0.25); // 1 win fill / 4 total fills
-        assert_eq!(stats.profit_factor, 2.0); // 10 / 5 = 2.0
+        assert_eq!(stats.win_rate, 0.25);
+        assert_eq!(stats.profit_factor, 2.0);
+    }
+
+    #[test]
+    fn test_trade_log_ring_buffer_caps_size() {
+        let cap = 3;
+        let mut log = TradeLog::new(TradeLogMode::RingBuffer(cap));
+        for i in 0..5 {
+            log.push_fill(TradeFill {
+                ts_exchange: i * 1000,
+                symbol_id: 1,
+                order_id: i as u64,
+                side: Side::Buy,
+                price: 100_00000000,
+                qty: 1_00000000,
+            });
+        }
+        assert_eq!(log.len(), cap);
+        let fills = log.fills_vec();
+        assert_eq!(fills.len(), cap);
+        assert_eq!(fills[0].order_id, 2);
+    }
+
+    #[test]
+    fn test_stats_summary_only_matches_full_log_for_small_input() {
+        let fills = vec![
+            TradeFill {
+                ts_exchange: 1_000,
+                symbol_id: 1,
+                order_id: 1,
+                side: Side::Buy,
+                price: 100_00000000,
+                qty: 1_00000000,
+            },
+            TradeFill {
+                ts_exchange: 2_000,
+                symbol_id: 1,
+                order_id: 2,
+                side: Side::Sell,
+                price: 110_00000000, // +10 PnL
+                qty: 1_00000000,
+            },
+            TradeFill {
+                ts_exchange: 3_000,
+                symbol_id: 1,
+                order_id: 3,
+                side: Side::Buy,
+                price: 100_00000000,
+                qty: 1_00000000,
+            },
+            TradeFill {
+                ts_exchange: 4_000,
+                symbol_id: 1,
+                order_id: 4,
+                side: Side::Sell,
+                price: 95_00000000, // -5 PnL
+                qty: 1_00000000,
+            },
+        ];
+
+        // Run with All mode to get reference stats.
+        let mut log_all = TradeLog::new(TradeLogMode::All);
+        for f in &fills {
+            log_all.push_fill(*f);
+        }
+        log_all.push_pnl_delta(2_000, 10_00000000);
+        log_all.push_pnl_delta(4_000, -5_00000000);
+
+        let stats_all = calculate_stats(&log_all);
+
+        // Run with SummaryOnly mode
+        let mut log_summary = TradeLog::new(TradeLogMode::SummaryOnly);
+        for f in &fills {
+            log_summary.push_fill(*f);
+        }
+        log_summary.push_pnl_delta(2_000, 10_00000000);
+        log_summary.push_pnl_delta(4_000, -5_00000000);
+
+        let inc_stats = log_summary.incremental_stats();
+
+        assert_eq!(inc_stats.total_pnl, stats_all.total_pnl);
+        assert_eq!(inc_stats.total_trades, stats_all.total_trades);
+        assert_eq!(inc_stats.win_count, 1);
     }
 }

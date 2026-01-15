@@ -9,7 +9,7 @@ use crate::exchange_simulator::ExchangeSimulator;
 use crate::latency_model::LatencyModel;
 use crate::queue_model::QueueModel;
 use crate::rng::make_small_rng;
-use crate::stats::{BacktestStats, TradeFill, TradeLog, calculate_stats};
+use crate::stats::{BacktestStats, TradeFill, TradeLog, TradeLogMode, calculate_stats};
 use crate::types::{FundingEvent, Order, OrderReport, Tick, TsLocalNs, TsSimNs};
 use rand::rngs::SmallRng;
 
@@ -31,6 +31,8 @@ pub struct EngineConfig {
     pub max_batch_ns: i64,
     /// RNG seed for all stochastic components owned by the engine.
     pub seed: u64,
+    /// Trade log retention mode (Phase 5.4).
+    pub trade_log_mode: TradeLogMode,
 }
 
 impl Default for EngineConfig {
@@ -41,6 +43,7 @@ impl Default for EngineConfig {
             mode: EngineMode::Tick,
             max_batch_ns: 0,
             seed: 0,
+            trade_log_mode: TradeLogMode::All,
         }
     }
 }
@@ -167,7 +170,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             latency_model,
             rng: make_small_rng(config.seed),
             account: Account::default(),
-            trade_log: TradeLog::default(),
+            trade_log: TradeLog::new(config.trade_log_mode),
             market: MarketView::default(),
             truth_last_trade_by_symbol: BTreeMap::new(),
             next_event_seq: 0,
@@ -305,7 +308,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             EventKind::Tick(tick) => {
                 self.truth_last_trade_by_symbol.insert(tick.symbol_id, tick);
                 // Market truth drives the exchange simulator only.
-                let mut fills: Vec<(Order, i64)> = Vec::new();
+                let mut fills: Vec<(Order, i64, i64)> = Vec::new();
                 let mut trade_fills: Vec<TradeFill> = Vec::new();
                 let reports = {
                     // Scope the mutable borrow of `self.exchanges` to avoid borrow conflicts.
@@ -315,7 +318,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                         if r.last_fill_qty > 0
                             && let Some(order) = ex.get_order(r.order_id)
                         {
-                            fills.push((order, r.last_fill_qty));
+                            fills.push((order, r.last_fill_qty, r.last_fill_price));
                             trade_fills.push(TradeFill {
                                 ts_exchange: tick.ts_exchange,
                                 symbol_id: r.symbol_id,
@@ -333,8 +336,9 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                     self.trade_log.push_fill(f);
                 }
 
-                for (order, fill_qty) in fills {
-                    self.account.on_fill(&order, fill_qty);
+                for (order, fill_qty, fill_price) in fills {
+                    let pnl_delta = self.account.on_fill(&order, fill_qty, fill_price);
+                    self.trade_log.push_pnl_delta(tick.ts_exchange, pnl_delta);
                 }
 
                 let ts_delivery = tick.ts_exchange + self.config.order_update_latency_ns;
@@ -574,6 +578,7 @@ mod tests {
             mode: EngineMode::Tick,
             max_batch_ns: 0,
             seed: 42,
+            ..Default::default()
         };
 
         let strategy = RecordingStrategy::default();
@@ -630,6 +635,7 @@ mod tests {
             mode: EngineMode::Tick,
             max_batch_ns: 0,
             seed: 42,
+            ..Default::default()
         };
         let strategy = NoopStrategy;
         let latency_model = ConstantLatency {
@@ -672,6 +678,7 @@ mod tests {
             mode: EngineMode::Tick,
             max_batch_ns: 0,
             seed: 42,
+            ..Default::default()
         };
         let strategy = RecordingStrategy::default();
         let latency_model = ConstantLatency {
@@ -735,6 +742,7 @@ mod tests {
             mode: EngineMode::Tick,
             max_batch_ns: 0,
             seed: 42,
+            ..Default::default()
         };
         let strategy = RecordingStrategy::default();
         let mut eng = Engine::new(
@@ -840,6 +848,7 @@ mod tests {
             mode: EngineMode::Tick,
             max_batch_ns: 0,
             seed: 42,
+            ..Default::default()
         };
         let t0 = fixtures::tick_trade(1_000, 1_000, 0);
         let t1 = Tick {

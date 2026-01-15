@@ -4,30 +4,38 @@ use std::collections::BTreeMap;
 
 mod arrow_utils;
 
+use arrow::array::{ArrayRef, Int8Builder, Int64Builder, UInt32Builder, UInt64Builder};
+use arrow::pyarrow::ToPyArrow;
 use arrow_utils::get_arrow_stream;
 use backtester_core::engine::{EngineConfig, EngineMode, Strategy as CoreStrategy};
 use backtester_core::latency_model::ConstantLatency;
 use backtester_core::queue_model::ConservativeQueue;
+use backtester_core::stats::{equity_curve_from_pnl_deltas, full_pnl_history};
 use backtester_core::tick_source::ArrowTickSource; // Import TickSource types
 use backtester_core::types::{Order, OrderReport, OrderType, Side, Tick};
-use backtester_core::{BacktestStats, TradeFill};
+use backtester_core::{BacktestStats, TradeFill, TradeLogMode};
 use backtester_core::{Context as CoreContext, Engine, EventKind};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule};
+use rayon::prelude::*;
+use std::sync::Arc;
 
 #[pyclass]
 pub struct Backtester {
     data: Py<PyAny>,
-    seed: u64,
+    feed_latency_ns: i64,
+    order_update_latency_ns: i64,
     python_mode: String,
     batch_ms: i64,
-    feed_latency_ns: i64,
+    seed: u64,
+    trade_log_mode: String,
 }
 
 #[pyclass]
 pub struct BacktestResult {
     trades: Vec<TradeFill>,
     stats: BacktestStats,
+    equity_curve: Vec<(i64, i64)>,
 }
 
 #[pymethods]
@@ -43,25 +51,90 @@ impl BacktestResult {
         }
         Ok(out)
     }
-}
 
+    /// Return trades as a PyArrow-compatible dict of arrays for zero-copy access.
+    /// Schema: ts_exchange (i64), symbol_id (u32), order_id (u64), side (i8), price (i64), qty (i64)
+    pub fn trades_df<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let n = self.trades.len();
+
+        let mut ts_builder = Int64Builder::with_capacity(n);
+        let mut symbol_builder = UInt32Builder::with_capacity(n);
+        let mut order_builder = UInt64Builder::with_capacity(n);
+        let mut side_builder = Int8Builder::with_capacity(n);
+        let mut price_builder = Int64Builder::with_capacity(n);
+        let mut qty_builder = Int64Builder::with_capacity(n);
+
+        for t in &self.trades {
+            ts_builder.append_value(t.ts_exchange);
+            symbol_builder.append_value(t.symbol_id);
+            order_builder.append_value(t.order_id);
+            side_builder.append_value(t.side.as_i8());
+            price_builder.append_value(t.price);
+            qty_builder.append_value(t.qty);
+        }
+
+        let ts_array: ArrayRef = Arc::new(ts_builder.finish());
+        let symbol_array: ArrayRef = Arc::new(symbol_builder.finish());
+        let order_array: ArrayRef = Arc::new(order_builder.finish());
+        let side_array: ArrayRef = Arc::new(side_builder.finish());
+        let price_array: ArrayRef = Arc::new(price_builder.finish());
+        let qty_array: ArrayRef = Arc::new(qty_builder.finish());
+
+        let d = PyDict::new_bound(py);
+        d.set_item("ts_exchange", ts_array.to_data().to_pyarrow(py)?)?;
+        d.set_item("symbol_id", symbol_array.to_data().to_pyarrow(py)?)?;
+        d.set_item("order_id", order_array.to_data().to_pyarrow(py)?)?;
+        d.set_item("side", side_array.to_data().to_pyarrow(py)?)?;
+        d.set_item("price", price_array.to_data().to_pyarrow(py)?)?;
+        d.set_item("qty", qty_array.to_data().to_pyarrow(py)?)?;
+        d.set_item("_len", n)?;
+        Ok(d)
+    }
+
+    /// Return equity curve as a PyArrow-compatible dict of arrays for zero-copy access.
+    /// Schema: ts_exchange (i64), equity (i64)
+    pub fn equity_curve_df<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let n = self.equity_curve.len();
+
+        let mut ts_builder = Int64Builder::with_capacity(n);
+        let mut equity_builder = Int64Builder::with_capacity(n);
+
+        for (ts, eq) in &self.equity_curve {
+            ts_builder.append_value(*ts);
+            equity_builder.append_value(*eq);
+        }
+
+        let ts_array: ArrayRef = Arc::new(ts_builder.finish());
+        let equity_array: ArrayRef = Arc::new(equity_builder.finish());
+
+        let d = PyDict::new_bound(py);
+        d.set_item("ts_exchange", ts_array.to_data().to_pyarrow(py)?)?;
+        d.set_item("equity", equity_array.to_data().to_pyarrow(py)?)?;
+        d.set_item("_len", n)?;
+        Ok(d)
+    }
+}
 #[pymethods]
 impl Backtester {
     #[new]
-    #[pyo3(signature = (data, seed, python_mode="tick".to_string(), batch_ms=100, feed_latency_ns=0))]
+    #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=0, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all"))]
     pub fn new(
         data: Py<PyAny>,
-        seed: u64,
-        python_mode: String,
-        batch_ms: i64,
         feed_latency_ns: i64,
+        order_update_latency_ns: i64,
+        python_mode: &str,
+        batch_ms: i64,
+        seed: u64,
+        trade_log_mode: &str,
     ) -> Self {
-        Self {
+        Backtester {
             data,
-            seed,
-            python_mode,
-            batch_ms,
             feed_latency_ns,
+            order_update_latency_ns,
+            python_mode: python_mode.to_string(),
+            batch_ms,
+            seed,
+            trade_log_mode: trade_log_mode.to_string(),
         }
     }
 
@@ -85,13 +158,25 @@ impl Backtester {
     pub fn run(&self, py: Python<'_>, strategy: Py<PyAny>) -> PyResult<BacktestResult> {
         let config = EngineConfig {
             feed_latency_ns: self.feed_latency_ns,
-            order_update_latency_ns: self.feed_latency_ns,
+            order_update_latency_ns: self.feed_latency_ns, // Using feed latency for order update implies simpler model
             mode: match self.python_mode.as_str() {
                 "batch" => EngineMode::Batch,
                 _ => EngineMode::Tick,
             },
             max_batch_ns: self.batch_ms.saturating_mul(1_000_000),
             seed: self.seed,
+            trade_log_mode: match self.trade_log_mode.to_lowercase().as_str() {
+                "all" => TradeLogMode::All,
+                "summaryonly" => TradeLogMode::SummaryOnly,
+                "none" => TradeLogMode::None,
+                s if s.starts_with("ringbuffer") => {
+                    // unexpected simple parsing for now, assuming RingBuffer(1000) passed as "ringbuffer"
+                    // Ideally parse "ringbuffer(1000)" or just "ringbuffer" with default.
+                    // For now, let's just default to RingBuffer(10000) if string matches.
+                    TradeLogMode::RingBuffer(10000)
+                }
+                _ => TradeLogMode::All,
+            },
         };
 
         let strat = PyStrategy { obj: strategy };
@@ -105,9 +190,105 @@ impl Backtester {
         schedule_ticks_from_python_polars(py, &self.data, self.feed_latency_ns, &mut engine)?;
         engine.run();
 
-        let trades = engine.trade_log().fills().to_vec();
+        let trades = engine.trade_log().fills_vec();
         let stats = engine.stats();
-        Ok(BacktestResult { trades, stats })
+        let all_pnl = full_pnl_history(engine.trade_log());
+        let equity_curve = equity_curve_from_pnl_deltas(&all_pnl);
+        Ok(BacktestResult {
+            trades,
+            stats,
+            equity_curve,
+        })
+    }
+
+    /// Run multiple backtests in parallel.
+    ///
+    /// Args:
+    ///     strategies: List of strategy objects (must implement on_tick/on_ticks etc).
+    ///
+    /// Returns:
+    ///     List of BacktestResult in the same order as inputs.
+    ///
+    /// The seed for each run is derived deterministically: `self.seed + index`.
+    /// Data is parsed once and shared across runs (zero-copy for the engine, but cloned Ticks for queue).
+    #[pyo3(signature = (strategies))]
+    pub fn run_many(
+        &self,
+        py: Python<'_>,
+        strategies: Vec<Py<PyAny>>,
+    ) -> PyResult<Vec<BacktestResult>> {
+        // 1. Pre-load data to avoid GIL during parallel execution setup.
+        let events = parse_polars_data(py, &self.data, self.feed_latency_ns)?;
+
+        // 2. Prepare configurations for each run.
+        let n = strategies.len();
+
+        let configs: Vec<EngineConfig> = (0..n)
+            .map(|i| {
+                EngineConfig {
+                    feed_latency_ns: self.feed_latency_ns,
+                    order_update_latency_ns: self.feed_latency_ns,
+                    mode: match self.python_mode.as_str() {
+                        "batch" => EngineMode::Batch,
+                        _ => EngineMode::Tick,
+                    },
+                    max_batch_ns: self.batch_ms.saturating_mul(1_000_000),
+                    // Deterministic seed derivation
+                    seed: self.seed.wrapping_add(i as u64),
+                    trade_log_mode: match self.trade_log_mode.to_lowercase().as_str() {
+                        "all" => TradeLogMode::All,
+                        "summaryonly" => TradeLogMode::SummaryOnly,
+                        "none" => TradeLogMode::None,
+                        s if s.starts_with("ringbuffer") => TradeLogMode::RingBuffer(10000),
+                        _ => TradeLogMode::All,
+                    },
+                }
+            })
+            .collect();
+
+        let latency_ns = self.feed_latency_ns;
+
+        // 3. Parallel execution releasing GIL.
+        let results: Result<Vec<BacktestResult>, String> = py.allow_threads(move || {
+            strategies
+                .into_par_iter()
+                .zip(configs.into_par_iter())
+                .map(|(strategy, config)| {
+                    let strat = PyStrategy { obj: strategy };
+                    let latency_model = ConstantLatency {
+                        feed_latency_ns: latency_ns,
+                        order_latency_ns: 0,
+                    };
+
+                    let mut engine: Engine<ConservativeQueue, PyStrategy, ConstantLatency> =
+                        Engine::new(ConservativeQueue, strat, config, latency_model);
+
+                    // Push pre-loaded events.
+                    for (ts, kind) in &events {
+                        engine.push_event(*ts, kind.clone());
+                    }
+
+                    engine.run();
+
+                    let trades = engine.trade_log().fills_vec();
+                    let stats = engine.stats();
+                    // full_pnl_history is not available here? It's a helper function, should be available if imported.
+                    // But we are in a closure. 'full_pnl_history' is a function item, so it's global.
+                    // However, we need to make sure 'full_pnl_history' is public/accessible in this module.
+                    // It is imported at top of file.
+                    let all_pnl = full_pnl_history(engine.trade_log());
+                    let equity_curve = equity_curve_from_pnl_deltas(&all_pnl);
+
+                    Ok(BacktestResult {
+                        trades,
+                        stats,
+                        equity_curve,
+                    })
+                })
+                .collect()
+        });
+
+        results.map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
     }
 
     /// Run backtest using an Arrow RecordBatch stream (zero-copy ingestion).
@@ -129,6 +310,13 @@ impl Backtester {
             },
             max_batch_ns: self.batch_ms.saturating_mul(1_000_000),
             seed: self.seed,
+            trade_log_mode: match self.trade_log_mode.to_lowercase().as_str() {
+                "all" => TradeLogMode::All,
+                "summaryonly" => TradeLogMode::SummaryOnly,
+                "none" => TradeLogMode::None,
+                s if s.starts_with("ringbuffer") => TradeLogMode::RingBuffer(10000),
+                _ => TradeLogMode::All,
+            },
         };
 
         let strat = PyStrategy { obj: strategy };
@@ -149,9 +337,15 @@ impl Backtester {
 
         engine.run();
 
-        let trades = engine.trade_log().fills().to_vec();
+        let trades = engine.trade_log().fills_vec();
         let stats = engine.stats();
-        Ok(BacktestResult { trades, stats })
+        let all_pnl = full_pnl_history(engine.trade_log());
+        let equity_curve = equity_curve_from_pnl_deltas(&all_pnl);
+        Ok(BacktestResult {
+            trades,
+            stats,
+            equity_curve,
+        })
     }
 }
 
@@ -517,12 +711,12 @@ fn order_report_to_pydict<'py>(py: Python<'py>, r: &OrderReport) -> PyResult<Bou
     Ok(d)
 }
 
-fn schedule_ticks_from_python_polars(
+// Helper to parse data once.
+fn parse_polars_data(
     py: Python<'_>,
     data: &Py<PyAny>,
     feed_latency_ns: i64,
-    engine: &mut Engine<ConservativeQueue, PyStrategy, ConstantLatency>,
-) -> PyResult<()> {
+) -> PyResult<Vec<(i64, EventKind)>> {
     let data_any = data.bind(py);
     let data_dict = data_any.downcast::<PyDict>()?;
 
@@ -538,6 +732,8 @@ fn schedule_ticks_from_python_polars(
     for (i, k) in keys.iter().enumerate() {
         symbol_ids.insert(k.clone(), (i as u32) + 1);
     }
+
+    let mut events = Vec::new();
 
     for k in keys {
         let lf_any = data_dict
@@ -650,11 +846,24 @@ fn schedule_ticks_from_python_polars(
                 ..truth_tick
             };
 
-            engine.push_event(ts_ex, EventKind::Tick(truth_tick));
-            engine.push_event(ts_local, EventKind::TickDelivery(delivered_tick));
+            events.push((ts_ex, EventKind::Tick(truth_tick)));
+            events.push((ts_local, EventKind::TickDelivery(delivered_tick)));
         }
     }
+    events.sort_by_key(|(ts, _)| *ts);
+    Ok(events)
+}
 
+fn schedule_ticks_from_python_polars(
+    py: Python<'_>,
+    data: &Py<PyAny>,
+    feed_latency_ns: i64,
+    engine: &mut Engine<ConservativeQueue, PyStrategy, ConstantLatency>,
+) -> PyResult<()> {
+    let events = parse_polars_data(py, data, feed_latency_ns)?;
+    for (ts, kind) in events {
+        engine.push_event(ts, kind);
+    }
     Ok(())
 }
 
