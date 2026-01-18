@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
 use rustc_hash::FxHashMap;
+use std::collections::BTreeMap;
 
 use crate::orderbook_l2::OrderBookL2;
 use crate::queue_model::QueueModel;
@@ -51,7 +51,7 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
         debug_assert!(order_id != 0, "order_id must be assigned by the engine");
 
         let queue_state = self.queue_model.register_order(&order, &self.book);
-        
+
         self.buckets
             .entry((order.price, order.side))
             .or_default()
@@ -136,10 +136,10 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
     pub fn remove_order(&mut self, order_id: u64) {
         if let Some(o) = self.orders.remove(&order_id) {
             let key = (o.order.price, o.order.side);
-            if let Some(bucket) = self.buckets.get_mut(&key) {
-                if let Some(idx) = bucket.iter().position(|&id| id == order_id) {
-                    bucket.remove(idx);
-                }
+            if let Some(bucket) = self.buckets.get_mut(&key)
+                && let Some(idx) = bucket.iter().position(|&id| id == order_id)
+            {
+                bucket.remove(idx);
             }
         }
     }
@@ -147,7 +147,7 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
     /// Process a market trade tick and generate order reports for any fills.
     pub fn on_trade(&mut self, trade: Tick, reports: &mut Vec<OrderReport>) {
         let queue_model = &mut self.queue_model;
-        
+
         // We only check orders that match the trade's price and have the opposite side of the trade initiator?
         // Wait, Tick side is the AGGRESSOR side.
         // If Trade is Buy, it matched against Sells.
@@ -155,7 +155,7 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
         // If Trade is Sell, it matched against Buys.
         // So we check our Buy orders.
         // And we check at the trade price.
-        
+
         let maker_side = match trade.side {
             Side::Buy => Side::Sell,
             Side::Sell => Side::Buy,
@@ -169,13 +169,13 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
             // So we must copy the IDs.
             // Optimization: SmallVec or just collect to Reusable Buffer?
             // For now, simple Vec clone. It's u64s.
-            let order_ids: Vec<u64> = bucket.clone(); 
-            
+            let order_ids: Vec<u64> = bucket.clone();
+
             for order_id in order_ids {
                 // Get mutable reference to order
                 // Note: remove_order might have been called recursively? No, on_trade doesn't call remove_order.
                 // But we must handle if order was removed? No, we just cloned existing IDs.
-                
+
                 let Some(o) = self.orders.get_mut(&order_id) else {
                     continue;
                 };

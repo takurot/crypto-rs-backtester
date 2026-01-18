@@ -1,6 +1,6 @@
 use rustc_hash::FxHashMap;
-use std::collections::BinaryHeap;
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
 use crate::account::Account;
 use crate::event::{Event, EventId, EventKind};
@@ -293,16 +293,17 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             }
 
             let next_queue_ts = self.queue.peek().map(|e| e.ts_sim()).unwrap_or(i64::MAX);
-            
+
             // Check if we have a source event earlier than the queue
-            if let Some(pe) = self.source_heap.peek() {
-                if pe.ts <= next_queue_ts {
-                     // We have a source event to process
-                     let idx = pe.source_idx;
-                     self.source_heap.pop(); // Remove from heap (we will consume it)
-                     
-                     // Consume from source
-                     let tick = self.sources[idx].next().unwrap(); // Must exist if it was in heap
+            if let Some(pe) = self.source_heap.peek()
+                && pe.ts <= next_queue_ts
+            {
+                // We have a source event to process
+                    let idx = pe.source_idx;
+                    self.source_heap.pop(); // Remove from heap (we will consume it)
+
+                    // Consume from source
+                    let tick = self.sources[idx].next().unwrap(); // Must exist if it was in heap
 
                     // Schedule Tick event (truth)
                     self.push_event(tick.ts_exchange, EventKind::Tick(tick));
@@ -320,7 +321,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                     delivered_tick.ts_local = delivery_ts;
 
                     self.push_event(delivery_ts, EventKind::TickDelivery(delivered_tick));
-                    
+
                     // Push next tick from this source to heap
                     if let Some(next) = self.sources[idx].peek() {
                         self.source_heap.push(PeekedEvent {
@@ -328,9 +329,8 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                             source_idx: idx,
                         });
                     }
-                    
+
                     continue;
-                }
             }
 
             // If we are here, either sources are empty or queue head is earlier than any source.
@@ -345,12 +345,12 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
         match event.kind {
             EventKind::Tick(tick) => {
                 self.truth_last_trade_by_symbol.insert(tick.symbol_id, tick);
-                
+
                 // Reuse buffers to avoid allocation
                 let mut reports = std::mem::take(&mut self.reusable_reports);
                 let mut fills = std::mem::take(&mut self.reusable_fills);
                 let mut trade_fills = std::mem::take(&mut self.reusable_trade_fills);
-                
+
                 reports.clear();
                 fills.clear();
                 trade_fills.clear();
@@ -360,7 +360,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                     // Scope the mutable borrow of `self.exchanges` to avoid borrow conflicts.
                     let ex = self.exchange_mut(tick.symbol_id);
                     ex.on_trade(tick, &mut reports);
-                    
+
                     for r in &reports {
                         if r.last_fill_qty > 0
                             && let Some(order) = ex.get_order(r.order_id)
@@ -391,7 +391,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 for r in reports.iter() {
                     self.push_event(ts_delivery, EventKind::OrderReport(*r));
                 }
-                
+
                 // Return buffers
                 self.reusable_reports = reports;
                 self.reusable_fills = fills;

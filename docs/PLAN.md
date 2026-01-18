@@ -380,8 +380,8 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - Reuse allocations via `Vec::clear()` instead of creating new Vecs per step (e.g., `fills`, `trade_fills` in `Engine::step`).
     - **Deliverable**: Reduced allocation overhead in batch mode and long-running backtests.
 
-- [ ] **6.2.3 EventKind Size Optimization**
-    - Analyze enum size with `std::mem::size_of` and consider boxing large variants.
+- [x] **6.2.3 EventKind Size Optimization**
+    - Analyze enum size with `std::mem::size_of` and consider boxing large variants. (Investigated: 64 bytes fits in a cache line, boxing unnecessary)
 
 - [x] **6.2.4 Order Bucket Indexing for Fill Checks** `[Depends on 1.2.3]`
     - Current `ExchangeSimulator::on_trade` scans all orders for each trade tick (O(orders × ticks)).
