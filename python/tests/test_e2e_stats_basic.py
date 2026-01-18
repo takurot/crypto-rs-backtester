@@ -3,7 +3,7 @@ import polars as pl
 import rust_backtester
 
 
-def make_ticks() -> pl.LazyFrame:
+def make_ticks(with_seq: bool = True) -> pl.LazyFrame:
     # Deterministic 3 ticks designed to:
     # - Fill a BUY @ 100 on tick#1 (sell trade at 100)
     # - Then fill a SELL @ 101 on tick#2 (buy trade at 101), realizing +1.00 quote PnL
@@ -11,14 +11,15 @@ def make_ticks() -> pl.LazyFrame:
     price = [100_00000000, 100_00000000, 101_00000000]
     qty = [1_00000000, 1_00000000, 1_00000000]
     side = [1, -1, 1]
-    data: dict[str, list[int]] = {
+    data = {
         "ts_exchange": ts_exchange,
         "price": price,
         "qty": qty,
         "side": side,
-        "seq": list(range(len(ts_exchange))),
     }
-    return pl.DataFrame(data).lazy()
+    if with_seq:
+        data["seq"] = list(range(len(ts_exchange)))
+    return pl.DataFrame(data).with_columns(pl.col("side").cast(pl.Int8)).lazy()
 
 
 class _RoundTripStrategy:

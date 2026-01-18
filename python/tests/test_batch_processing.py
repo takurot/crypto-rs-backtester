@@ -8,7 +8,7 @@ def make_ticks(ts_exchange: list[int], *, with_seq: bool = True) -> pl.LazyFrame
     price = [100_00000000 for _ in ts_exchange]
     qty = [1_00000000 for _ in ts_exchange]
     side = [1 if i % 2 == 0 else -1 for i in range(len(ts_exchange))]
-    data: dict[str, list[int]] = {
+    data = {
         "ts_exchange": ts_exchange,
         "price": price,
         "qty": qty,
@@ -16,7 +16,7 @@ def make_ticks(ts_exchange: list[int], *, with_seq: bool = True) -> pl.LazyFrame
     }
     if with_seq:
         data["seq"] = list(range(len(ts_exchange)))
-    return pl.DataFrame(data).lazy()
+    return pl.DataFrame(data).with_columns(pl.col("side").cast(pl.Int8)).lazy()
 
 
 class _BatchRecorder:

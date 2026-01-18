@@ -8,7 +8,7 @@ import polars as pl
 import pytest
 
 
-def make_trade_ticks_lazyframe() -> pl.LazyFrame:
+def make_trade_ticks_lazyframe(with_seq: bool = True) -> pl.LazyFrame:
     """Generate minimal tick data that produces fills for testing exports."""
     # Buy at 100, counter-party sell at 100 -> fill
     # Sell at 110, counter-party buy at 110 -> fill (+10 PnL)
@@ -16,14 +16,10 @@ def make_trade_ticks_lazyframe() -> pl.LazyFrame:
     price = [100_00000000, 100_00000000, 110_00000000, 110_00000000]
     qty = [1_00000000, 1_00000000, 1_00000000, 1_00000000]
     side = [1, -1, -1, 1]  # Buy, Sell, Sell, Buy
-    data = {
-        "ts_exchange": ts_exchange,
-        "price": price,
-        "qty": qty,
-        "side": side,
-        "seq": list(range(len(ts_exchange))),
-    }
-    return pl.DataFrame(data).lazy()
+    data = {"ts_exchange": ts_exchange, "price": price, "qty": qty, "side": side}
+    if with_seq:
+        data["seq"] = list(range(len(ts_exchange)))
+    return pl.DataFrame(data).with_columns(pl.col("side").cast(pl.Int8)).lazy()
 
 
 class SimpleStrategy:

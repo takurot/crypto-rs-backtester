@@ -3,16 +3,17 @@ import polars as pl
 import rust_backtester
 
 
-def make_ticks(*, ts_exchange: list[int], price: int, qty: int, side: list[int]) -> pl.LazyFrame:
+def make_ticks(*, ts_exchange: list[int], price: int, qty: int, side: list[int], with_seq: bool = True) -> pl.LazyFrame:
     assert len(ts_exchange) == len(side)
     data: dict[str, list[int]] = {
         "ts_exchange": ts_exchange,
         "price": [price for _ in ts_exchange],
         "qty": [qty for _ in ts_exchange],
         "side": side,
-        "seq": list(range(len(ts_exchange))),
     }
-    return pl.DataFrame(data).lazy()
+    if with_seq:
+        data["seq"] = list(range(len(ts_exchange)))
+    return pl.DataFrame(data).with_columns(pl.col("side").cast(pl.Int8)).lazy()
 
 
 class _Recorder:

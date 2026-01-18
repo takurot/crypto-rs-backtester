@@ -18,7 +18,7 @@ def make_ticks(*, feed_latency_ns: int) -> pl.LazyFrame:
         "seq": list(range(len(ts_exchange))),
         # Intentionally omit ts_local to exercise engine computation: ts_local = ts_exchange + feed_latency
     }
-    return pl.DataFrame(data).lazy()
+    return pl.DataFrame(data).with_columns(pl.col("side").cast(pl.Int8)).lazy()
 
 
 class _LookaheadGuard:
