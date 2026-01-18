@@ -426,7 +426,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Suggested code location**: `backtester-core/src/tick_source.rs`
 
 ### 6.4 Incremental Statistics
-- [ ] **6.4.1 Streaming Stats Accumulation** `[Depends on 5.4]`
+- [x] **6.4.1 Streaming Stats Accumulation** `[Depends on 5.4]`
     - Implement `IncrementalStats` struct that updates on each fill/PnL event.
     - Avoid post-hoc O(n) scan in `calculate_stats()`.
     - **Deliverable**: Constant-time stats retrieval; enables `TradeLogMode::SummaryOnly`.
