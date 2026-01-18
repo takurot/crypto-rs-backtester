@@ -3,7 +3,7 @@ import polars as pl
 import rust_backtester
 
 
-def make_ticks() -> pl.LazyFrame:
+def make_ticks(with_seq: bool = True) -> pl.LazyFrame:
     # Deterministic 3 ticks designed to:
     # - Fill a BUY @ 100 on tick#1 (sell trade at 100)
     # - Then fill a SELL @ 101 on tick#2 (buy trade at 101), realizing +1.00 quote PnL
@@ -11,14 +11,15 @@ def make_ticks() -> pl.LazyFrame:
     price = [100_00000000, 100_00000000, 101_00000000]
     qty = [1_00000000, 1_00000000, 1_00000000]
     side = [1, -1, 1]
-    data: dict[str, list[int]] = {
+    data = {
         "ts_exchange": ts_exchange,
         "price": price,
         "qty": qty,
         "side": side,
-        "seq": list(range(len(ts_exchange))),
     }
-    return pl.DataFrame(data).lazy()
+    if with_seq:
+        data["seq"] = list(range(len(ts_exchange)))
+    return pl.DataFrame(data).with_columns(pl.col("side").cast(pl.Int8)).lazy()
 
 
 class _RoundTripStrategy:
@@ -26,22 +27,22 @@ class _RoundTripStrategy:
         self.submitted_buy = False
         self.submitted_sell = False
 
-    def on_tick(self, tick: dict, ctx) -> None:  # noqa: ANN001
+    def on_tick(self, tick, ctx) -> None:  # noqa: ANN001
         if not self.submitted_buy:
             self.submitted_buy = True
             ctx.submit_order(
-                symbol_id=int(tick["symbol_id"]),
+                symbol_id=tick.symbol_id,
                 side=1,  # buy
-                price=int(tick["price"]),
-                qty=int(tick["qty"]),
+                price=tick.price,
+                qty=tick.qty,
             )
 
-    def on_order_update(self, report: dict, ctx) -> None:  # noqa: ANN001
+    def on_order_update(self, report, ctx) -> None:  # noqa: ANN001
         # After the BUY is filled, submit a SELL @ 101 to close and realize PnL.
-        if report.get("status") == "Filled" and not self.submitted_sell:
+        if report.status == "Filled" and not self.submitted_sell:
             self.submitted_sell = True
             ctx.submit_order(
-                symbol_id=int(report["symbol_id"]),
+                symbol_id=report.symbol_id,
                 side=-1,  # sell
                 price=101_00000000,
                 qty=1_00000000,

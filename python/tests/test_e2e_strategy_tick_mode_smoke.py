@@ -8,15 +8,10 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     price = [100_00000000, 101_00000000, 99_00000000, 100_00000000]
     qty = [1_00000000, 1_00000000, 1_00000000, 1_00000000]
     side = [1, -1, 1, -1]
-    data: dict[str, list[int]] = {
-        "ts_exchange": ts_exchange,
-        "price": price,
-        "qty": qty,
-        "side": side,
-    }
+    data = {"ts_exchange": ts_exchange, "price": price, "qty": qty, "side": side}
     if with_seq:
         data["seq"] = list(range(len(ts_exchange)))
-    return pl.DataFrame(data).lazy()
+    return pl.DataFrame(data).with_columns(pl.col("side").cast(pl.Int8)).lazy()
 
 
 class _RecordingStrategy:

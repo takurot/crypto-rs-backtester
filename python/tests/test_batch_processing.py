@@ -8,7 +8,7 @@ def make_ticks(ts_exchange: list[int], *, with_seq: bool = True) -> pl.LazyFrame
     price = [100_00000000 for _ in ts_exchange]
     qty = [1_00000000 for _ in ts_exchange]
     side = [1 if i % 2 == 0 else -1 for i in range(len(ts_exchange))]
-    data: dict[str, list[int]] = {
+    data = {
         "ts_exchange": ts_exchange,
         "price": price,
         "qty": qty,
@@ -16,7 +16,7 @@ def make_ticks(ts_exchange: list[int], *, with_seq: bool = True) -> pl.LazyFrame
     }
     if with_seq:
         data["seq"] = list(range(len(ts_exchange)))
-    return pl.DataFrame(data).lazy()
+    return pl.DataFrame(data).with_columns(pl.col("side").cast(pl.Int8)).lazy()
 
 
 class _BatchRecorder:
@@ -54,21 +54,26 @@ class _OrderUpdateWakeRecorder:
     def __init__(self) -> None:
         self.tick_wake_ts: list[int] = []
         self.order_update_wake_ts: list[int] = []
-        self.seen_reports: list[dict] = []
+        self.seen_reports: list = []
 
-    def on_ticks(self, ticks: list[dict], ctx) -> None:  # noqa: ANN001
+    def on_ticks(self, ticks, ctx) -> None:  # noqa: ANN001
         self.tick_wake_ts.append(int(ctx.ts_local()))
 
         # Submit a buy order on the first wakeup only.
         if len(self.tick_wake_ts) == 1:
+            # ticks is now an Arrow RecordBatch, access columns by index
+            price_idx = ticks.schema.get_field_index("price")
+            qty_idx = ticks.schema.get_field_index("qty")
+            price_col = ticks.column(price_idx)
+            qty_col = ticks.column(qty_idx)
             ctx.submit_order(
                 symbol_id=1,
                 side=1,
-                price=int(ticks[0]["price"]),
-                qty=int(ticks[0]["qty"]),
+                price=int(price_col[0].as_py()),
+                qty=int(qty_col[0].as_py()),
             )
 
-    def on_order_updates(self, reports: list[dict], ctx) -> None:  # noqa: ANN001
+    def on_order_updates(self, reports, ctx) -> None:  # noqa: ANN001
         self.order_update_wake_ts.append(int(ctx.ts_local()))
         self.seen_reports.extend(reports)
 

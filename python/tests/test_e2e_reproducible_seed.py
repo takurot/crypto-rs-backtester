@@ -3,38 +3,41 @@ import polars as pl
 import rust_backtester
 
 
-def make_ticks(*, ts_exchange: list[int], price: int, qty: int, side: list[int]) -> pl.LazyFrame:
+def make_ticks(*, ts_exchange: list[int], price: int, qty: int, side: list[int], with_seq: bool = True) -> pl.LazyFrame:
     assert len(ts_exchange) == len(side)
     data: dict[str, list[int]] = {
         "ts_exchange": ts_exchange,
         "price": [price for _ in ts_exchange],
         "qty": [qty for _ in ts_exchange],
         "side": side,
-        "seq": list(range(len(ts_exchange))),
     }
-    return pl.DataFrame(data).lazy()
+    if with_seq:
+        data["seq"] = list(range(len(ts_exchange)))
+    return pl.DataFrame(data).with_columns(pl.col("side").cast(pl.Int8)).lazy()
 
 
 class _Recorder:
     def __init__(self) -> None:
-        self.ticks: list[dict] = []
-        self.reports: list[dict] = []
+        self.ticks: list = []
+        self.reports: list = []
         self.submitted = False
 
-    def on_tick(self, tick: dict, ctx) -> None:  # noqa: ANN001
-        self.ticks.append(tick)
+    def on_tick(self, tick, ctx) -> None:  # noqa: ANN001
+        # Store tick as tuple for easy comparison
+        self.ticks.append((tick.ts_exchange, tick.symbol_id, tick.price, tick.qty, tick.side))
 
         if not self.submitted:
             self.submitted = True
             ctx.submit_order(
-                symbol_id=int(tick["symbol_id"]),
+                symbol_id=tick.symbol_id,
                 side=1,  # buy
-                price=int(tick["price"]),
-                qty=int(tick["qty"]),
+                price=tick.price,
+                qty=tick.qty,
             )
 
-    def on_order_update(self, report: dict, ctx) -> None:  # noqa: ANN001
-        self.reports.append(report)
+    def on_order_update(self, report, ctx) -> None:  # noqa: ANN001
+        # Store report as tuple for easy comparison
+        self.reports.append((report.order_id, report.symbol_id, report.status))
 
 
 def test_e2e_reproducible_seed() -> None:

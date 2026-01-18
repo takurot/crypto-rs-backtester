@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 mod arrow_utils;
 
 use arrow::array::{ArrayRef, Int8Builder, Int64Builder, UInt32Builder, UInt64Builder};
+use arrow::datatypes::{DataType, Field, Schema};
 use arrow::pyarrow::ToPyArrow;
+use arrow::record_batch::RecordBatch;
 use arrow_utils::get_arrow_stream;
 use backtester_core::engine::{EngineConfig, EngineMode, Strategy as CoreStrategy};
 use backtester_core::latency_model::ConstantLatency;
@@ -19,6 +21,120 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule};
 use rayon::prelude::*;
 use std::sync::Arc;
+
+#[pyclass]
+#[derive(Debug, Clone)]
+pub struct PyTick {
+    #[pyo3(get)]
+    ts_exchange: i64,
+    #[pyo3(get)]
+    ts_local: i64,
+    #[pyo3(get)]
+    seq: u64,
+    #[pyo3(get)]
+    symbol_id: u32,
+    #[pyo3(get)]
+    price: i64,
+    #[pyo3(get)]
+    qty: i64,
+    #[pyo3(get)]
+    side: i8,
+    #[pyo3(get)]
+    flags: u8,
+}
+
+#[pymethods]
+impl PyTick {
+    fn __getitem__(&self, key: &str) -> PyResult<PyObject> {
+        Python::with_gil(|py| match key {
+            "ts_exchange" => Ok(self.ts_exchange.into_py(py)),
+            "ts_local" => Ok(self.ts_local.into_py(py)),
+            "seq" => Ok(self.seq.into_py(py)),
+            "symbol_id" => Ok(self.symbol_id.into_py(py)),
+            "price" => Ok(self.price.into_py(py)),
+            "qty" => Ok(self.qty.into_py(py)),
+            "side" => Ok(self.side.into_py(py)),
+            "flags" => Ok(self.flags.into_py(py)),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                key.to_string(),
+            )),
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Tick(ts_exchange={}, symbol_id={}, price={}, qty={}, side={})",
+            self.ts_exchange, self.symbol_id, self.price, self.qty, self.side
+        )
+    }
+}
+
+#[pyclass]
+#[derive(Debug, Clone)]
+pub struct PyOrderReport {
+    #[pyo3(get)]
+    order_id: u64,
+    #[pyo3(get)]
+    symbol_id: u32,
+    #[pyo3(get)]
+    status: String,
+    #[pyo3(get)]
+    last_fill_qty: i64,
+    #[pyo3(get)]
+    last_fill_price: i64,
+    #[pyo3(get)]
+    filled_qty: i64,
+    #[pyo3(get)]
+    remaining_qty: i64,
+    #[pyo3(get)]
+    reason: Option<String>,
+}
+
+#[pymethods]
+impl PyOrderReport {
+    fn __getitem__(&self, key: &str) -> PyResult<PyObject> {
+        Python::with_gil(|py| match key {
+            "order_id" => Ok(self.order_id.into_py(py)),
+            "symbol_id" => Ok(self.symbol_id.into_py(py)),
+            "status" => Ok(self.status.clone().into_py(py)),
+            "last_fill_qty" => Ok(self.last_fill_qty.into_py(py)),
+            "last_fill_price" => Ok(self.last_fill_price.into_py(py)),
+            "filled_qty" => Ok(self.filled_qty.into_py(py)),
+            "remaining_qty" => Ok(self.remaining_qty.into_py(py)),
+            "reason" => Ok(self.reason.clone().into_py(py)),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                key.to_string(),
+            )),
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "OrderReport(order_id={}, symbol_id={}, status={}, last_fill_qty={}, filled_qty={}, remaining_qty={})",
+            self.order_id,
+            self.symbol_id,
+            self.status,
+            self.last_fill_qty,
+            self.filled_qty,
+            self.remaining_qty
+        )
+    }
+
+    /// Dict-like get method for backward compatibility
+    fn get(&self, key: &str, default: Option<PyObject>) -> PyResult<PyObject> {
+        Python::with_gil(|py| match key {
+            "order_id" => Ok(self.order_id.into_py(py)),
+            "symbol_id" => Ok(self.symbol_id.into_py(py)),
+            "status" => Ok(self.status.clone().into_py(py)),
+            "last_fill_qty" => Ok(self.last_fill_qty.into_py(py)),
+            "last_fill_price" => Ok(self.last_fill_price.into_py(py)),
+            "filled_qty" => Ok(self.filled_qty.into_py(py)),
+            "remaining_qty" => Ok(self.remaining_qty.into_py(py)),
+            "reason" => Ok(self.reason.clone().into_py(py)),
+            _ => Ok(default.unwrap_or_else(|| py.None())),
+        })
+    }
+}
 
 #[pyclass]
 pub struct Backtester {
@@ -158,7 +274,7 @@ impl Backtester {
     pub fn run(&self, py: Python<'_>, strategy: Py<PyAny>) -> PyResult<BacktestResult> {
         let config = EngineConfig {
             feed_latency_ns: self.feed_latency_ns,
-            order_update_latency_ns: self.feed_latency_ns, // Using feed latency for order update implies simpler model
+            order_update_latency_ns: self.order_update_latency_ns,
             mode: match self.python_mode.as_str() {
                 "batch" => EngineMode::Batch,
                 _ => EngineMode::Tick,
@@ -169,12 +285,7 @@ impl Backtester {
                 "all" => TradeLogMode::All,
                 "summaryonly" => TradeLogMode::SummaryOnly,
                 "none" => TradeLogMode::None,
-                s if s.starts_with("ringbuffer") => {
-                    // unexpected simple parsing for now, assuming RingBuffer(1000) passed as "ringbuffer"
-                    // Ideally parse "ringbuffer(1000)" or just "ringbuffer" with default.
-                    // For now, let's just default to RingBuffer(10000) if string matches.
-                    TradeLogMode::RingBuffer(10000)
-                }
+                s if s.starts_with("ringbuffer") => TradeLogMode::RingBuffer(10000),
                 _ => TradeLogMode::All,
             },
         };
@@ -187,7 +298,36 @@ impl Backtester {
         let mut engine: Engine<ConservativeQueue, PyStrategy, ConstantLatency> =
             Engine::new(ConservativeQueue, strat, config, latency_model);
 
-        schedule_ticks_from_python_polars(py, &self.data, self.feed_latency_ns, &mut engine)?;
+        // Zero-copy ingestion path
+        let data_any = self.data.bind(py);
+        let data_dict = data_any.downcast::<PyDict>()?;
+
+        let mut keys: Vec<String> = Vec::with_capacity(data_dict.len());
+        for (k, _v) in data_dict.iter() {
+            keys.push(k.extract::<String>()?);
+        }
+        keys.sort();
+
+        let mut symbol_ids: BTreeMap<String, u32> = BTreeMap::new();
+        for (i, k) in keys.iter().enumerate() {
+            symbol_ids.insert(k.clone(), (i as u32) + 1);
+        }
+
+        for k in keys {
+            let symbol_id = *symbol_ids.get(&k).unwrap();
+            let lf_any = data_dict
+                .get_item(&k)?
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("missing key"))?;
+
+            // Convert Polars LazyFrame -> DataFrame -> Arrow Table -> Arrow Stream
+            let df = lf_any.call_method0("collect")?;
+            let table = df.call_method0("to_arrow")?;
+            let stream = get_arrow_stream(&table)?;
+
+            let source = ArrowTickSource::new(symbol_id, stream);
+            engine.add_tick_source(Box::new(source));
+        }
+
         engine.run();
 
         let trades = engine.trade_log().fills_vec();
@@ -495,7 +635,7 @@ impl PyContext {
 impl CoreStrategy for PyStrategy {
     fn on_tick(&mut self, tick: &Tick, _ctx: &mut backtester_core::Context<'_>) {
         Python::with_gil(|py| {
-            let tick_dict = tick_to_pydict(py, tick)?;
+            let tick_obj = tick_to_pyobject(py, tick)?;
             let strategy = self.obj.bind(py);
 
             // Provide a minimal ctx object to support order submission and timestamp introspection.
@@ -510,9 +650,9 @@ impl CoreStrategy for PyStrategy {
 
             // Tick mode: prefer `on_tick`; fall back to `on_ticks([tick], ctx)` for compatibility.
             if strategy.hasattr("on_tick")? {
-                strategy.call_method1("on_tick", (tick_dict, py_ctx.clone_ref(py)))?;
+                strategy.call_method1("on_tick", (tick_obj, py_ctx.clone_ref(py)))?;
             } else if strategy.hasattr("on_ticks")? {
-                let ticks = PyList::new_bound(py, [tick_dict]);
+                let ticks = PyList::new_bound(py, [tick_obj]);
                 strategy.call_method1("on_ticks", (ticks, py_ctx.clone_ref(py)))?;
             }
 
@@ -524,7 +664,7 @@ impl CoreStrategy for PyStrategy {
 
     fn on_order_update(&mut self, report: &OrderReport, _ctx: &mut backtester_core::Context<'_>) {
         Python::with_gil(|py| {
-            let report_dict = order_report_to_pydict(py, report)?;
+            let report_obj = order_report_to_pyobject(py, report)?;
             let strategy = self.obj.bind(py);
 
             let py_ctx = Py::new(
@@ -537,9 +677,9 @@ impl CoreStrategy for PyStrategy {
             )?;
 
             if strategy.hasattr("on_order_update")? {
-                strategy.call_method1("on_order_update", (report_dict, py_ctx.clone_ref(py)))?;
+                strategy.call_method1("on_order_update", (report_obj, py_ctx.clone_ref(py)))?;
             } else if strategy.hasattr("on_order_updates")? {
-                let reports = PyList::new_bound(py, [report_dict]);
+                let reports = PyList::new_bound(py, [report_obj]);
                 strategy.call_method1("on_order_updates", (reports, py_ctx.clone_ref(py)))?;
             }
 
@@ -562,18 +702,62 @@ impl CoreStrategy for PyStrategy {
             )?;
 
             if strategy.hasattr("on_ticks")? {
-                let tick_dicts: Vec<Bound<'_, PyDict>> = ticks
-                    .iter()
-                    .map(|t| tick_to_pydict(py, t))
-                    .collect::<PyResult<_>>()?;
-                let ticks_list = PyList::new_bound(py, tick_dicts);
-                strategy.call_method1("on_ticks", (ticks_list, py_ctx.clone_ref(py)))?;
+                // Zero-copy optimization: Convert ticks to Arrow RecordBatch
+                let n = ticks.len();
+                let mut ts_builder = Int64Builder::with_capacity(n);
+                let mut local_builder = Int64Builder::with_capacity(n);
+                let mut seq_builder = UInt64Builder::with_capacity(n);
+                let mut sym_builder = UInt32Builder::with_capacity(n);
+                let mut price_builder = Int64Builder::with_capacity(n);
+                let mut qty_builder = Int64Builder::with_capacity(n);
+                let mut side_builder = Int8Builder::with_capacity(n);
+                let mut flags_builder = arrow::array::UInt8Builder::with_capacity(n);
+
+                for t in ticks {
+                    ts_builder.append_value(t.ts_exchange);
+                    local_builder.append_value(t.ts_local);
+                    seq_builder.append_value(t.seq);
+                    sym_builder.append_value(t.symbol_id);
+                    price_builder.append_value(t.price);
+                    qty_builder.append_value(t.qty);
+                    side_builder.append_value(t.side.as_i8());
+                    flags_builder.append_value(t.flags);
+                }
+
+                let schema = Schema::new(vec![
+                    Field::new("ts_exchange", DataType::Int64, false),
+                    Field::new("ts_local", DataType::Int64, false),
+                    Field::new("seq", DataType::UInt64, false),
+                    Field::new("symbol_id", DataType::UInt32, false),
+                    Field::new("price", DataType::Int64, false),
+                    Field::new("qty", DataType::Int64, false),
+                    Field::new("side", DataType::Int8, false),
+                    Field::new("flags", DataType::UInt8, false),
+                ]);
+
+                let batch = RecordBatch::try_new(
+                    Arc::new(schema),
+                    vec![
+                        Arc::new(ts_builder.finish()),
+                        Arc::new(local_builder.finish()),
+                        Arc::new(seq_builder.finish()),
+                        Arc::new(sym_builder.finish()),
+                        Arc::new(price_builder.finish()),
+                        Arc::new(qty_builder.finish()),
+                        Arc::new(side_builder.finish()),
+                        Arc::new(flags_builder.finish()),
+                    ],
+                )
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+                let py_batch = batch.to_pyarrow(py)?;
+                strategy.call_method1("on_ticks", (py_batch, py_ctx.clone_ref(py)))?;
             } else {
                 // Fallback: call per-tick
                 for t in ticks {
-                    let d = tick_to_pydict(py, t)?;
+                    let obj = tick_to_pyobject(py, t)?;
                     if strategy.hasattr("on_tick")? {
-                        strategy.call_method1("on_tick", (d, py_ctx.clone_ref(py)))?;
+                        strategy.call_method1("on_tick", (obj, py_ctx.clone_ref(py)))?;
                     }
                 }
             }
@@ -597,18 +781,18 @@ impl CoreStrategy for PyStrategy {
             )?;
 
             if strategy.hasattr("on_order_updates")? {
-                let report_dicts: Vec<Bound<'_, PyDict>> = reports
+                let report_objs: Vec<Py<PyAny>> = reports
                     .iter()
-                    .map(|r| order_report_to_pydict(py, r))
+                    .map(|r| order_report_to_pyobject(py, r))
                     .collect::<PyResult<_>>()?;
-                let reports_list = PyList::new_bound(py, report_dicts);
+                let reports_list = PyList::new_bound(py, report_objs);
                 strategy.call_method1("on_order_updates", (reports_list, py_ctx.clone_ref(py)))?;
             } else {
                 // Fallback: call per-report
                 for r in reports {
-                    let d = order_report_to_pydict(py, r)?;
+                    let obj = order_report_to_pyobject(py, r)?;
                     if strategy.hasattr("on_order_update")? {
-                        strategy.call_method1("on_order_update", (d, py_ctx.clone_ref(py)))?;
+                        strategy.call_method1("on_order_update", (obj, py_ctx.clone_ref(py)))?;
                     }
                 }
             }
@@ -654,17 +838,18 @@ fn apply_py_ctx_commands(
     Ok(())
 }
 
-fn tick_to_pydict<'py>(py: Python<'py>, tick: &Tick) -> PyResult<Bound<'py, PyDict>> {
-    let d = PyDict::new_bound(py);
-    d.set_item("ts_exchange", tick.ts_exchange)?;
-    d.set_item("ts_local", tick.ts_local)?;
-    d.set_item("seq", tick.seq)?;
-    d.set_item("symbol_id", tick.symbol_id)?;
-    d.set_item("price", tick.price)?;
-    d.set_item("qty", tick.qty)?;
-    d.set_item("side", tick.side.as_i8())?;
-    d.set_item("flags", tick.flags)?;
-    Ok(d)
+fn tick_to_pyobject(py: Python<'_>, tick: &Tick) -> PyResult<Py<PyAny>> {
+    let t = PyTick {
+        ts_exchange: tick.ts_exchange,
+        ts_local: tick.ts_local,
+        seq: tick.seq,
+        symbol_id: tick.symbol_id,
+        price: tick.price,
+        qty: tick.qty,
+        side: tick.side.as_i8(),
+        flags: tick.flags,
+    };
+    Ok(Py::new(py, t)?.into_any())
 }
 
 fn trade_fill_to_pydict<'py>(py: Python<'py>, t: &TradeFill) -> PyResult<Bound<'py, PyDict>> {
@@ -698,17 +883,18 @@ fn backtest_stats_to_pydict<'py>(
     Ok(d)
 }
 
-fn order_report_to_pydict<'py>(py: Python<'py>, r: &OrderReport) -> PyResult<Bound<'py, PyDict>> {
-    let d = PyDict::new_bound(py);
-    d.set_item("order_id", r.order_id)?;
-    d.set_item("symbol_id", r.symbol_id)?;
-    d.set_item("status", format!("{:?}", r.status))?;
-    d.set_item("last_fill_qty", r.last_fill_qty)?;
-    d.set_item("last_fill_price", r.last_fill_price)?;
-    d.set_item("filled_qty", r.filled_qty)?;
-    d.set_item("remaining_qty", r.remaining_qty)?;
-    d.set_item("reason", r.reason.map(|s| s.to_string()))?;
-    Ok(d)
+fn order_report_to_pyobject(py: Python<'_>, r: &OrderReport) -> PyResult<Py<PyAny>> {
+    let rep = PyOrderReport {
+        order_id: r.order_id,
+        symbol_id: r.symbol_id,
+        status: format!("{:?}", r.status),
+        last_fill_qty: r.last_fill_qty,
+        last_fill_price: r.last_fill_price,
+        filled_qty: r.filled_qty,
+        remaining_qty: r.remaining_qty,
+        reason: r.reason.map(|s| s.to_string()),
+    };
+    Ok(Py::new(py, rep)?.into_any())
 }
 
 // Helper to parse data once.
@@ -854,24 +1040,13 @@ fn parse_polars_data(
     Ok(events)
 }
 
-fn schedule_ticks_from_python_polars(
-    py: Python<'_>,
-    data: &Py<PyAny>,
-    feed_latency_ns: i64,
-    engine: &mut Engine<ConservativeQueue, PyStrategy, ConstantLatency>,
-) -> PyResult<()> {
-    let events = parse_polars_data(py, data, feed_latency_ns)?;
-    for (ts, kind) in events {
-        engine.push_event(ts, kind);
-    }
-    Ok(())
-}
-
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<Backtester>()?;
     m.add_class::<BacktestResult>()?;
+    m.add_class::<PyTick>()?;
+    m.add_class::<PyOrderReport>()?;
     m.add_function(wrap_pyfunction!(call_strategy_on_ticks, m)?)?;
     Ok(())
 }
