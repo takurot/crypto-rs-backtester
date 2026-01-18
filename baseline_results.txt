@@ -1,0 +1,9 @@
+Baseline Results (Phase 6 Optimizations):
+bench_event_loop_1m_ticks: 147.1ms
+bench_engine_e2e_tick_4x250k: 200.4ms
+bench_engine_e2e_batch_4x250k: 184.6ms
+
+Previous Baseline:
+bench_event_loop_1m_ticks: 35.8ms
+bench_engine_e2e_tick_4x250k: 216.5ms
+bench_engine_e2e_batch_4x250k: 200.2ms

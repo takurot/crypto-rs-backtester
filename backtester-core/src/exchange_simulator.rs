@@ -1,8 +1,9 @@
+use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
 
 use crate::orderbook_l2::OrderBookL2;
 use crate::queue_model::QueueModel;
-use crate::types::{L2Update, Order, OrderReport, OrderState, Tick};
+use crate::types::{L2Update, Order, OrderReport, OrderState, Side, Tick};
 
 #[derive(Debug, Clone)]
 struct LiveOrder<S> {
@@ -24,6 +25,8 @@ pub struct ExchangeSimulator<Q: QueueModel> {
     book: OrderBookL2,
     queue_model: Q,
     orders: BTreeMap<u64, LiveOrder<Q::State>>,
+    /// Optimization: Index active orders by (price, side) to avoid scanning all orders on every trade.
+    buckets: FxHashMap<(i64, Side), Vec<u64>>,
 }
 
 impl<Q: QueueModel> ExchangeSimulator<Q> {
@@ -32,6 +35,7 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
             book: OrderBookL2::new(),
             queue_model,
             orders: BTreeMap::new(),
+            buckets: FxHashMap::default(),
         }
     }
 
@@ -47,6 +51,12 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
         debug_assert!(order_id != 0, "order_id must be assigned by the engine");
 
         let queue_state = self.queue_model.register_order(&order, &self.book);
+
+        self.buckets
+            .entry((order.price, order.side))
+            .or_default()
+            .push(order_id);
+
         self.orders.insert(
             order_id,
             LiveOrder {
@@ -124,54 +134,90 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
 
     /// Remove an order from the active set (typically called when terminal).
     pub fn remove_order(&mut self, order_id: u64) {
-        self.orders.remove(&order_id);
+        if let Some(o) = self.orders.remove(&order_id) {
+            let key = (o.order.price, o.order.side);
+            if let Some(bucket) = self.buckets.get_mut(&key)
+                && let Some(idx) = bucket.iter().position(|&id| id == order_id)
+            {
+                bucket.remove(idx);
+            }
+        }
     }
 
     /// Process a market trade tick and generate order reports for any fills.
-    pub fn on_trade(&mut self, trade: Tick) -> Vec<OrderReport> {
-        let mut reports = Vec::new();
-
+    pub fn on_trade(&mut self, trade: Tick, reports: &mut Vec<OrderReport>) {
         let queue_model = &mut self.queue_model;
-        for o in self.orders.values_mut() {
-            if o.remaining_qty <= 0 {
-                continue;
-            }
-            if !matches!(
-                o.state,
-                OrderState::Open | OrderState::PartiallyFilled | OrderState::PendingCancel
-            ) {
-                continue;
-            }
 
-            let fill_qty =
-                queue_model.check_fill(&o.order, o.remaining_qty, &trade, &mut o.queue_state);
-            if fill_qty <= 0 {
-                continue;
+        // We only check orders that match the trade's price and have the opposite side of the trade initiator?
+        // Wait, Tick side is the AGGRESSOR side.
+        // If Trade is Buy, it matched against Sells.
+        // So we check our Sell orders.
+        // If Trade is Sell, it matched against Buys.
+        // So we check our Buy orders.
+        // And we check at the trade price.
+
+        let maker_side = match trade.side {
+            Side::Buy => Side::Sell,
+            Side::Sell => Side::Buy,
+            Side::None => return,
+        };
+
+        if let Some(bucket) = self.buckets.get(&(trade.price, maker_side)) {
+            // Iterate a copy of ids to avoid borrowing conflicts with self.orders
+            // (bucket is borrowed from self.buckets)
+            // But we can't borrow self.orders mutably while bucket is borrowed.
+            // So we must copy the IDs.
+            // Optimization: SmallVec or just collect to Reusable Buffer?
+            // For now, simple Vec clone. It's u64s.
+            let order_ids: Vec<u64> = bucket.clone();
+
+            for order_id in order_ids {
+                // Get mutable reference to order
+                // Note: remove_order might have been called recursively? No, on_trade doesn't call remove_order.
+                // But we must handle if order was removed? No, we just cloned existing IDs.
+
+                let Some(o) = self.orders.get_mut(&order_id) else {
+                    continue;
+                };
+
+                if o.remaining_qty <= 0 {
+                    continue;
+                }
+                if !matches!(
+                    o.state,
+                    OrderState::Open | OrderState::PartiallyFilled | OrderState::PendingCancel
+                ) {
+                    continue;
+                }
+
+                let fill_qty =
+                    queue_model.check_fill(&o.order, o.remaining_qty, &trade, &mut o.queue_state);
+                if fill_qty <= 0 {
+                    continue;
+                }
+
+                o.filled_qty += fill_qty;
+                o.remaining_qty -= fill_qty;
+                let status = if o.remaining_qty == 0 {
+                    o.state = OrderState::Filled;
+                    OrderState::Filled
+                } else {
+                    o.state = OrderState::PartiallyFilled;
+                    OrderState::PartiallyFilled
+                };
+
+                reports.push(OrderReport {
+                    order_id: o.order.order_id,
+                    symbol_id: o.order.symbol_id,
+                    status,
+                    last_fill_qty: fill_qty,
+                    last_fill_price: trade.price,
+                    filled_qty: o.filled_qty,
+                    remaining_qty: o.remaining_qty,
+                    reason: None,
+                });
             }
-
-            o.filled_qty += fill_qty;
-            o.remaining_qty -= fill_qty;
-            let status = if o.remaining_qty == 0 {
-                o.state = OrderState::Filled;
-                OrderState::Filled
-            } else {
-                o.state = OrderState::PartiallyFilled;
-                OrderState::PartiallyFilled
-            };
-
-            reports.push(OrderReport {
-                order_id: o.order.order_id,
-                symbol_id: o.order.symbol_id,
-                status,
-                last_fill_qty: fill_qty,
-                last_fill_price: trade.price,
-                filled_qty: o.filled_qty,
-                remaining_qty: o.remaining_qty,
-                reason: None,
-            });
         }
-
-        reports
     }
 }
 
@@ -252,7 +298,9 @@ mod tests {
             side: Side::Sell,
             flags: 0x01,
         };
-        assert!(ex.on_trade(t1).is_empty());
+        let mut reports = Vec::new();
+        ex.on_trade(t1, &mut reports);
+        assert!(reports.is_empty());
         assert_eq!(ex.get_filled_qty(id), Some(0));
         assert_eq!(ex.get_remaining_qty(id), Some(3));
 
@@ -266,12 +314,13 @@ mod tests {
             side: Side::Sell,
             flags: 0x01,
         };
-        let r2 = ex.on_trade(t2);
-        assert_eq!(r2.len(), 1);
-        assert_eq!(r2[0].status, OrderState::PartiallyFilled);
-        assert_eq!(r2[0].last_fill_qty, 1);
-        assert_eq!(r2[0].filled_qty, 1);
-        assert_eq!(r2[0].remaining_qty, 2);
+        ex.on_trade(t2, &mut reports);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].status, OrderState::PartiallyFilled);
+        assert_eq!(reports[0].last_fill_qty, 1);
+        assert_eq!(reports[0].filled_qty, 1);
+        assert_eq!(reports[0].remaining_qty, 2);
+        reports.clear();
 
         let t3 = Tick {
             ts_exchange: 4_000,
@@ -283,12 +332,12 @@ mod tests {
             side: Side::Sell,
             flags: 0x01,
         };
-        let r3 = ex.on_trade(t3);
-        assert_eq!(r3.len(), 1);
-        assert_eq!(r3[0].status, OrderState::Filled);
-        assert_eq!(r3[0].last_fill_qty, 2);
-        assert_eq!(r3[0].filled_qty, 3);
-        assert_eq!(r3[0].remaining_qty, 0);
+        ex.on_trade(t3, &mut reports);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].status, OrderState::Filled);
+        assert_eq!(reports[0].last_fill_qty, 2);
+        assert_eq!(reports[0].filled_qty, 3);
+        assert_eq!(reports[0].remaining_qty, 0);
         assert_eq!(ex.get_order_state(id), Some(OrderState::Filled));
     }
 
@@ -323,7 +372,8 @@ mod tests {
             side: Side::Sell,
             flags: 0x01,
         };
-        let reports = ex.on_trade(trade);
+        let mut reports = Vec::new();
+        ex.on_trade(trade, &mut reports);
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].status, OrderState::Filled);
         assert_eq!(ex.get_order_state(id), Some(OrderState::Filled));

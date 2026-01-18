@@ -1,4 +1,6 @@
-use std::collections::BTreeMap;
+use rustc_hash::FxHashMap;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
 use crate::account::Account;
 use crate::event::{Event, EventId, EventKind};
@@ -51,7 +53,7 @@ impl Default for EngineConfig {
 /// Feed-delayed market state visible to strategies.
 #[derive(Debug, Default, Clone)]
 pub struct MarketView {
-    last_trade_by_symbol: BTreeMap<u32, Tick>,
+    last_trade_by_symbol: FxHashMap<u32, Tick>,
 }
 
 impl MarketView {
@@ -128,6 +130,28 @@ impl<'a> Context<'a> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PeekedEvent {
+    ts: i64,
+    source_idx: usize,
+}
+
+impl Ord for PeekedEvent {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Min-heap on ts, then source_idx
+        other
+            .ts
+            .cmp(&self.ts)
+            .then_with(|| other.source_idx.cmp(&self.source_idx))
+    }
+}
+
+impl PartialOrd for PeekedEvent {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// Discrete-event simulation engine.
 pub struct Engine<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> {
     config: EngineConfig,
@@ -135,9 +159,9 @@ pub struct Engine<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> {
     /// Prototype queue model used when instantiating a new per-symbol exchange simulator.
     queue_model: Q,
     /// One exchange simulator per `(exchange, symbol)` stream (represented by `symbol_id`).
-    exchanges: BTreeMap<u32, ExchangeSimulator<Q>>,
+    exchanges: FxHashMap<u32, ExchangeSimulator<Q>>,
     /// Route `order_id -> symbol_id` so ACK/cancel events can find the right exchange instance.
-    order_symbol_by_id: BTreeMap<u64, u32>,
+    order_symbol_by_id: FxHashMap<u64, u32>,
     next_order_id: u64,
     strategy: S,
     latency_model: L,
@@ -145,7 +169,7 @@ pub struct Engine<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> {
     account: Account,
     trade_log: TradeLog,
     market: MarketView,
-    truth_last_trade_by_symbol: BTreeMap<u32, Tick>,
+    truth_last_trade_by_symbol: FxHashMap<u32, Tick>,
     next_event_seq: u64,
     now_ts_sim: TsSimNs,
     // Batch-mode buffering (Phase 2).
@@ -155,6 +179,13 @@ pub struct Engine<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> {
     next_timer_id: u64,
     // Phase 5.2: Streaming sources
     sources: Vec<Box<dyn TickSource>>,
+    source_heap: BinaryHeap<PeekedEvent>,
+    is_source_heap_initialized: bool,
+
+    // Optimization buffers
+    reusable_reports: Vec<OrderReport>,
+    reusable_fills: Vec<(Order, i64, i64)>,
+    reusable_trade_fills: Vec<TradeFill>,
 }
 
 impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
@@ -163,8 +194,8 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             config,
             queue: EventQueue::new(),
             queue_model,
-            exchanges: BTreeMap::new(),
-            order_symbol_by_id: BTreeMap::new(),
+            exchanges: FxHashMap::default(),
+            order_symbol_by_id: FxHashMap::default(),
             next_order_id: 1,
             strategy,
             latency_model,
@@ -172,7 +203,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             account: Account::default(),
             trade_log: TradeLog::new(config.trade_log_mode),
             market: MarketView::default(),
-            truth_last_trade_by_symbol: BTreeMap::new(),
+            truth_last_trade_by_symbol: FxHashMap::default(),
             next_event_seq: 0,
             now_ts_sim: 0,
             tick_buffer: Vec::new(),
@@ -180,11 +211,17 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             active_batch_timer_id: None,
             next_timer_id: 1,
             sources: Vec::new(),
+            source_heap: BinaryHeap::new(),
+            is_source_heap_initialized: false,
+            reusable_reports: Vec::with_capacity(16),
+            reusable_fills: Vec::with_capacity(16),
+            reusable_trade_fills: Vec::with_capacity(16),
         }
     }
 
     pub fn add_tick_source(&mut self, source: Box<dyn TickSource>) {
         self.sources.push(source);
+        self.is_source_heap_initialized = false;
     }
 
     pub fn strategy(&self) -> &S {
@@ -241,57 +278,58 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
 
     pub fn step(&mut self) -> Option<Event> {
         // 1. Ingest from sources if they have events earlier than (or equal to) the queue head.
-        // We repeat this check because ingesting one source tick might simply push to the queue,
-        // and we might need to ingest another one before popping.
         loop {
-            let mut min_source_idx = None;
-            let mut min_source_ts = i64::MAX;
-
-            for (i, source) in self.sources.iter_mut().enumerate() {
-                if let Some(tick) = source.peek() {
-                    // We schedule Tick at ts_exchange.
-                    // Tie-breaking: if timestamps are equal, we prefer the source with the lower index (stable/deterministic).
-                    if tick.ts_exchange < min_source_ts {
-                        min_source_ts = tick.ts_exchange;
-                        min_source_idx = Some(i);
+            if !self.is_source_heap_initialized {
+                self.source_heap.clear();
+                for (i, source) in self.sources.iter_mut().enumerate() {
+                    if let Some(tick) = source.peek() {
+                        self.source_heap.push(PeekedEvent {
+                            ts: tick.ts_exchange,
+                            source_idx: i,
+                        });
                     }
                 }
+                self.is_source_heap_initialized = true;
             }
 
             let next_queue_ts = self.queue.peek().map(|e| e.ts_sim()).unwrap_or(i64::MAX);
 
-            if min_source_ts != i64::MAX && min_source_ts <= next_queue_ts {
-                if let (Some(_idx), Some(tick)) =
-                    (min_source_idx, self.sources[min_source_idx.unwrap()].next())
-                {
-                    // Schedule Tick event (truth)
-                    self.push_event(tick.ts_exchange, EventKind::Tick(tick));
+            // Check if we have a source event earlier than the queue
+            if let Some(pe) = self.source_heap.peek()
+                && pe.ts <= next_queue_ts
+            {
+                // We have a source event to process
+                let idx = pe.source_idx;
+                self.source_heap.pop(); // Remove from heap (we will consume it)
 
-                    // Schedule TickDelivery event (strategy)
-                    // Apply feed latency if ts_local is not provided or invalid?
-                    // The Tick struct usually comes with ts_local populated by source or we enforce it here?
-                    // ArrowTickSource populated ts_local using `ts_exchange + config_latency`?
-                    // No, ArrowTickSource takes `ts_local` column OR `ts_exchange`.
-                    // If `ts_local` is 0/missing in struct, we might want to override it?
-                    // But TickSource should yield valid Ticks.
-                    // Let's assume Tick is valid.
-                    // Note: `run_arrow` in lib.rs sets `ts_local` if column missing logic? No.
-                    // ArrowTickSource uses 0 if missing.
+                // Consume from source
+                let tick = self.sources[idx].next().unwrap(); // Must exist if it was in heap
 
-                    // If ts_local is 0, we should apply config.feed_latency_ns.
-                    let delivery_ts = if tick.ts_local == 0 {
-                        tick.ts_exchange + self.config.feed_latency_ns
-                    } else {
-                        tick.ts_local
-                    };
+                // Schedule Tick event (truth)
+                self.push_event(tick.ts_exchange, EventKind::Tick(tick));
 
-                    // Fix the tick's ts_local if we calculated it
-                    let mut delivered_tick = tick;
-                    delivered_tick.ts_local = delivery_ts;
+                // Schedule TickDelivery event (strategy)
+                // If ts_local is 0, we should apply config.feed_latency_ns.
+                let delivery_ts = if tick.ts_local == 0 {
+                    tick.ts_exchange + self.config.feed_latency_ns
+                } else {
+                    tick.ts_local
+                };
 
-                    self.push_event(delivery_ts, EventKind::TickDelivery(delivered_tick));
+                // Fix the tick's ts_local if we calculated it
+                let mut delivered_tick = tick;
+                delivered_tick.ts_local = delivery_ts;
+
+                self.push_event(delivery_ts, EventKind::TickDelivery(delivered_tick));
+
+                // Push next tick from this source to heap
+                if let Some(next) = self.sources[idx].peek() {
+                    self.source_heap.push(PeekedEvent {
+                        ts: next.ts_exchange,
+                        source_idx: idx,
+                    });
                 }
-                // Continue loop to check sources/queue again
+
                 continue;
             }
 
@@ -307,13 +345,22 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
         match event.kind {
             EventKind::Tick(tick) => {
                 self.truth_last_trade_by_symbol.insert(tick.symbol_id, tick);
+
+                // Reuse buffers to avoid allocation
+                let mut reports = std::mem::take(&mut self.reusable_reports);
+                let mut fills = std::mem::take(&mut self.reusable_fills);
+                let mut trade_fills = std::mem::take(&mut self.reusable_trade_fills);
+
+                reports.clear();
+                fills.clear();
+                trade_fills.clear();
+
                 // Market truth drives the exchange simulator only.
-                let mut fills: Vec<(Order, i64, i64)> = Vec::new();
-                let mut trade_fills: Vec<TradeFill> = Vec::new();
-                let reports = {
+                {
                     // Scope the mutable borrow of `self.exchanges` to avoid borrow conflicts.
                     let ex = self.exchange_mut(tick.symbol_id);
-                    let reports = ex.on_trade(tick);
+                    ex.on_trade(tick, &mut reports);
+
                     for r in &reports {
                         if r.last_fill_qty > 0
                             && let Some(order) = ex.get_order(r.order_id)
@@ -329,22 +376,26 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                             });
                         }
                     }
-                    reports
                 };
 
-                for f in trade_fills {
+                for f in trade_fills.iter().copied() {
                     self.trade_log.push_fill(f);
                 }
 
-                for (order, fill_qty, fill_price) in fills {
-                    let pnl_delta = self.account.on_fill(&order, fill_qty, fill_price);
+                for (order, fill_qty, fill_price) in fills.iter() {
+                    let pnl_delta = self.account.on_fill(order, *fill_qty, *fill_price);
                     self.trade_log.push_pnl_delta(tick.ts_exchange, pnl_delta);
                 }
 
                 let ts_delivery = tick.ts_exchange + self.config.order_update_latency_ns;
-                for r in reports {
-                    self.push_event(ts_delivery, EventKind::OrderReport(r));
+                for r in reports.iter() {
+                    self.push_event(ts_delivery, EventKind::OrderReport(*r));
                 }
+
+                // Return buffers
+                self.reusable_reports = reports;
+                self.reusable_fills = fills;
+                self.reusable_trade_fills = trade_fills;
             }
             EventKind::TickDelivery(tick) => {
                 // Strategy view updates only on delivered ticks.
