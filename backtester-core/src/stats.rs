@@ -1,22 +1,26 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
+use wide::f64x4;
+
 use crate::types::{FixedPoint, Side, TsExchangeNs};
 
 /// A single executed fill (logical trade log row).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct TradeFill {
     pub ts_exchange: TsExchangeNs,
-    pub symbol_id: u32,
     pub order_id: u64,
-    /// Side of the *strategy's* order which got filled.
-    pub side: Side,
     pub price: i64,
     pub qty: i64,
+    pub symbol_id: u32,
+    /// Side of the *strategy's* order which got filled.
+    pub side: Side,
 }
 
 /// Arbitrary PnL event (e.g. funding payment).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct PnlEvent {
     pub ts_exchange: TsExchangeNs,
     pub pnl: i64,
@@ -512,6 +516,42 @@ pub fn equity_curve_from_pnl_deltas(deltas: &[(TsExchangeNs, i64)]) -> Vec<(TsEx
     curve
 }
 
+/// SIMD-friendly (unrolled) equity curve prefix sum.
+pub fn equity_curve_from_pnl_deltas_simd(
+    deltas: &[(TsExchangeNs, i64)],
+) -> Vec<(TsExchangeNs, i64)> {
+    let mut equity: i64 = 0;
+    let mut curve: Vec<(TsExchangeNs, i64)> = Vec::with_capacity(deltas.len());
+
+    let mut i = 0;
+    while i + 4 <= deltas.len() {
+        let (ts0, d0) = deltas[i];
+        let (ts1, d1) = deltas[i + 1];
+        let (ts2, d2) = deltas[i + 2];
+        let (ts3, d3) = deltas[i + 3];
+
+        let e0 = equity.saturating_add(d0);
+        let e1 = e0.saturating_add(d1);
+        let e2 = e1.saturating_add(d2);
+        let e3 = e2.saturating_add(d3);
+
+        curve.push((ts0, e0));
+        curve.push((ts1, e1));
+        curve.push((ts2, e2));
+        curve.push((ts3, e3));
+
+        equity = e3;
+        i += 4;
+    }
+
+    for (ts, d) in &deltas[i..] {
+        equity = equity.saturating_add(*d);
+        curve.push((*ts, equity));
+    }
+
+    curve
+}
+
 /// Compute max drawdown (%) and its duration from a time-ordered equity curve.
 ///
 /// - `max_drawdown` is reported as percent (0..=100).
@@ -578,6 +618,106 @@ pub fn sortino_ratio_from_pnl_series(pnl: &[i64]) -> f64 {
         })
         .sum::<f64>()
         / (n as f64);
+    let downside_std = downside_var.sqrt();
+    if downside_std == 0.0 {
+        return 0.0;
+    }
+    mean / downside_std
+}
+
+fn simd_reduce_sum(v: f64x4) -> f64 {
+    let arr: [f64; 4] = v.into();
+    arr.into_iter().sum()
+}
+
+fn simd_sum_f64_from_i64(pnl: &[i64]) -> f64 {
+    let mut sum_vec = f64x4::splat(0.0);
+    let mut chunks = pnl.chunks_exact(4);
+    for chunk in &mut chunks {
+        let v = f64x4::from([
+            chunk[0] as f64,
+            chunk[1] as f64,
+            chunk[2] as f64,
+            chunk[3] as f64,
+        ]);
+        sum_vec = sum_vec + v;
+    }
+    let mut sum = simd_reduce_sum(sum_vec);
+    for &x in chunks.remainder() {
+        sum += x as f64;
+    }
+    sum
+}
+
+fn simd_sum_sq_diff(pnl: &[i64], mean: f64) -> f64 {
+    let mut sum_vec = f64x4::splat(0.0);
+    let mean_vec = f64x4::splat(mean);
+    let mut chunks = pnl.chunks_exact(4);
+    for chunk in &mut chunks {
+        let v = f64x4::from([
+            chunk[0] as f64,
+            chunk[1] as f64,
+            chunk[2] as f64,
+            chunk[3] as f64,
+        ]);
+        let d = v - mean_vec;
+        sum_vec = sum_vec + d * d;
+    }
+    let mut sum = simd_reduce_sum(sum_vec);
+    for &x in chunks.remainder() {
+        let d = x as f64 - mean;
+        sum += d * d;
+    }
+    sum
+}
+
+fn simd_sum_downside_sq(pnl: &[i64]) -> f64 {
+    let mut sum_vec = f64x4::splat(0.0);
+    let zero = f64x4::splat(0.0);
+    let mut chunks = pnl.chunks_exact(4);
+    for chunk in &mut chunks {
+        let v = f64x4::from([
+            chunk[0] as f64,
+            chunk[1] as f64,
+            chunk[2] as f64,
+            chunk[3] as f64,
+        ]);
+        let neg = v.min(zero);
+        sum_vec = sum_vec + neg * neg;
+    }
+    let mut sum = simd_reduce_sum(sum_vec);
+    for &x in chunks.remainder() {
+        let d = x as f64;
+        if d < 0.0 {
+            sum += d * d;
+        }
+    }
+    sum
+}
+
+/// SIMD-accelerated Sharpe ratio calculation (mean/std over PnL series).
+pub fn sharpe_ratio_from_pnl_series_simd(pnl: &[i64]) -> f64 {
+    let n = pnl.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let mean = simd_sum_f64_from_i64(pnl) / n as f64;
+    let var = simd_sum_sq_diff(pnl, mean) / (n as f64 - 1.0);
+    let std = var.sqrt();
+    if std == 0.0 {
+        return 0.0;
+    }
+    mean / std
+}
+
+/// SIMD-accelerated Sortino ratio calculation (mean / downside std).
+pub fn sortino_ratio_from_pnl_series_simd(pnl: &[i64]) -> f64 {
+    let n = pnl.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let mean = simd_sum_f64_from_i64(pnl) / n as f64;
+    let downside_var = simd_sum_downside_sq(pnl) / n as f64;
     let downside_std = downside_var.sqrt();
     if downside_std == 0.0 {
         return 0.0;
@@ -1138,5 +1278,42 @@ mod tests {
         assert!((actual.sortino_ratio - expected.sortino_ratio).abs() < 1e-12);
         assert!((actual.max_drawdown - expected.max_drawdown).abs() < 1e-12);
         assert!((actual.calmar_ratio - expected.calmar_ratio).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_simd_sharpe_sortino_matches_scalar() {
+        let pnl = vec![
+            -5_000_000, 10_000_000, -2_500_000, 7_500_000, 0, 1_250_000, -3_750_000, 9_000_000,
+            -1_000_000, 4_000_000, 2_000_000,
+        ];
+
+        let sharpe_scalar = sharpe_ratio_from_pnl_series(&pnl);
+        let sortino_scalar = sortino_ratio_from_pnl_series(&pnl);
+
+        let sharpe_simd = sharpe_ratio_from_pnl_series_simd(&pnl);
+        let sortino_simd = sortino_ratio_from_pnl_series_simd(&pnl);
+
+        assert!((sharpe_simd - sharpe_scalar).abs() < 1e-10);
+        assert!((sortino_simd - sortino_scalar).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_equity_curve_simd_matches_scalar() {
+        let deltas: Vec<(TsExchangeNs, i64)> = (0..17)
+            .map(|i| {
+                let pnl = match i % 4 {
+                    0 => 5_000_000,
+                    1 => -3_000_000,
+                    2 => 2_000_000,
+                    _ => -1_000_000,
+                };
+                (1_000 + i as i64 * 10, pnl)
+            })
+            .collect();
+
+        let scalar = equity_curve_from_pnl_deltas(&deltas);
+        let simd = equity_curve_from_pnl_deltas_simd(&deltas);
+
+        assert_eq!(simd, scalar);
     }
 }
