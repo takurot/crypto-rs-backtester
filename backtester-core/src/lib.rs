@@ -9,6 +9,7 @@ pub mod orderbook_l2;
 pub mod queue_model;
 pub mod rng;
 pub mod stats;
+pub mod sweep;
 pub mod tick_source;
 pub mod types;
 
@@ -22,6 +23,7 @@ pub use rng::make_small_rng;
 pub use stats::{
     BacktestStats, IncrementalStats, TradeFill, TradeLog, TradeLogMode, calculate_stats,
 };
+pub use sweep::{SweepResult, run_parameter_sweep};
 pub use tick_source::{ArrowTickSource, TickSource};
 pub use types::{
     FixedPoint, FundingEvent, L2Update, Order, OrderReport, OrderState, OrderType, Side, Tick,

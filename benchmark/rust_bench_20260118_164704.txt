@@ -1,0 +1,12 @@
+bench_engine_e2e_tick_4x250k
+                        time:   [1.7472 s 1.7788 s 1.8102 s]
+                        change: [+543.60% +623.97% +713.57%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+bench_engine_e2e_batch_4x250k
+                        time:   [1.8058 s 1.8675 s 1.9419 s]
+                        change: [+893.34% +953.78% +1008.6%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high mild
+

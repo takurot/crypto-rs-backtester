@@ -434,21 +434,24 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
         - `test_incremental_stats_matches_batch_calculation()`
 
 ### 6.5 SIMD & Vectorized Computation
-- [ ] **6.5.1 SIMD Stats Calculation (Optional)**
+- [x] **6.5.1 SIMD Stats Calculation (Optional)**
     - Use `std::simd` (nightly) or `wide`/`ultraviolet` crate for equity curve prefix sum, Sharpe/Sortino calculation.
     - **Deliverable**: 2-5x faster stats for large trade logs.
+    - **Notes**: Added wide-based SIMD Sharpe/Sortino helpers and an unrolled equity-curve prefix sum; new Criterion bench added.
     - **Suggested benches**:
         - `bench_stats_simd_vs_scalar()`
 
 ### 6.6 Parallel Execution
-- [ ] **6.6.1 Rayon-Based Parallel Sweeps** `[Depends on 5.5]`
+- [x] **6.6.1 Rayon-Based Parallel Sweeps** `[Depends on 5.5]`
     - Use `rayon::par_iter` for multi-core parameter sweeps.
     - Ensure thread-local RNG seeding for determinism.
     - **Deliverable**: Linear speedup with core count.
+    - **Notes**: Added `run_parameter_sweep` (rayon) with deterministic seed derivation and ordering tests.
 
 ### 6.7 Cache & Memory Optimizations
-- [ ] **6.7.1 Struct Layout Analysis**
+- [x] **6.7.1 Struct Layout Analysis**
     - Profile cache behavior with `perf` or similar tools.
     - Reorder struct fields for better cache locality.
     - Consider `#[repr(C)]` for predictable layout.
     - **Deliverable**: Reduced cache misses in hot loops.
+    - **Notes**: Reordered hot structs (`Tick`, `Order`, `L2Update`, `TradeFill`) and pinned layouts with `#[repr(C)]`; added size guards.

@@ -67,20 +67,22 @@ impl TryFrom<i8> for Side {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum OrderType {
-    Limit,
+    Limit = 0,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum OrderState {
-    Created,
-    PendingNew,
-    Open,
-    PartiallyFilled,
-    PendingCancel,
-    Cancelled,
-    Filled,
-    Rejected,
+    Created = 0,
+    PendingNew = 1,
+    Open = 2,
+    PartiallyFilled = 3,
+    PendingCancel = 4,
+    Cancelled = 5,
+    Filled = 6,
+    Rejected = 7,
 }
 
 impl OrderState {
@@ -113,68 +115,74 @@ impl OrderState {
 
 /// A minimal order update message for strategy callbacks (fills/cancels/rejects).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct OrderReport {
     pub order_id: u64,
-    pub symbol_id: u32,
-    pub status: OrderState,
     pub last_fill_qty: i64,
     pub last_fill_price: i64,
     pub filled_qty: i64,
     pub remaining_qty: i64,
     pub reason: Option<&'static str>,
+    pub symbol_id: u32,
+    pub status: OrderState,
 }
 
 /// Funding payment event (perpetual futures).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct FundingEvent {
     pub ts_exchange: TsExchangeNs,
-    pub symbol_id: u32,
     /// Fixed-point rate (scaled by 1e8). e.g. 0.0001 => 10_000.
     pub rate: i64,
+    pub symbol_id: u32,
 }
 
 /// Tick (trade/quote) logical representation for callbacks/logging.
 ///
 /// Note: `seq` is included to support deterministic ordering within a stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct Tick {
     pub ts_exchange: TsExchangeNs,
     pub ts_local: TsLocalNs,
     pub seq: u64,
-    pub symbol_id: u32,
     pub price: i64,
     pub qty: i64,
+    pub symbol_id: u32,
     pub side: Side,
     pub flags: u8,
 }
 
 /// L2 order book update (price level).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct L2Update {
     pub ts_exchange: TsExchangeNs,
     pub seq: u64,
-    pub symbol_id: u32,
     pub price: i64,
     pub qty: i64, // 0 = remove level
+    pub symbol_id: u32,
     pub side: Side,
 }
 
 /// A minimal limit order representation (scaffolding).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct Order {
     pub order_id: u64,
     pub ts_submit: TsLocalNs,
     pub seq: u64,
+    pub price: i64,
+    pub qty: i64,
     pub symbol_id: u32,
     pub side: Side,
     pub order_type: OrderType,
-    pub price: i64,
-    pub qty: i64,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stats::TradeFill;
 
     #[test]
     fn test_fixed_point_roundtrip_io_only() {
@@ -195,5 +203,17 @@ mod tests {
         assert!(OrderState::PendingCancel.can_transition_to(OrderState::Cancelled));
 
         assert!(!OrderState::Filled.can_transition_to(OrderState::Open));
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn test_struct_layout_sizes_for_cache() {
+        use std::mem::size_of;
+
+        assert_eq!(size_of::<Tick>(), 48);
+        assert_eq!(size_of::<L2Update>(), 40);
+        assert_eq!(size_of::<Order>(), 48);
+        assert_eq!(size_of::<OrderReport>(), 64);
+        assert_eq!(size_of::<TradeFill>(), 40);
     }
 }
