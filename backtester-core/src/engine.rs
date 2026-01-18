@@ -299,38 +299,38 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 && pe.ts <= next_queue_ts
             {
                 // We have a source event to process
-                    let idx = pe.source_idx;
-                    self.source_heap.pop(); // Remove from heap (we will consume it)
+                let idx = pe.source_idx;
+                self.source_heap.pop(); // Remove from heap (we will consume it)
 
-                    // Consume from source
-                    let tick = self.sources[idx].next().unwrap(); // Must exist if it was in heap
+                // Consume from source
+                let tick = self.sources[idx].next().unwrap(); // Must exist if it was in heap
 
-                    // Schedule Tick event (truth)
-                    self.push_event(tick.ts_exchange, EventKind::Tick(tick));
+                // Schedule Tick event (truth)
+                self.push_event(tick.ts_exchange, EventKind::Tick(tick));
 
-                    // Schedule TickDelivery event (strategy)
-                    // If ts_local is 0, we should apply config.feed_latency_ns.
-                    let delivery_ts = if tick.ts_local == 0 {
-                        tick.ts_exchange + self.config.feed_latency_ns
-                    } else {
-                        tick.ts_local
-                    };
+                // Schedule TickDelivery event (strategy)
+                // If ts_local is 0, we should apply config.feed_latency_ns.
+                let delivery_ts = if tick.ts_local == 0 {
+                    tick.ts_exchange + self.config.feed_latency_ns
+                } else {
+                    tick.ts_local
+                };
 
-                    // Fix the tick's ts_local if we calculated it
-                    let mut delivered_tick = tick;
-                    delivered_tick.ts_local = delivery_ts;
+                // Fix the tick's ts_local if we calculated it
+                let mut delivered_tick = tick;
+                delivered_tick.ts_local = delivery_ts;
 
-                    self.push_event(delivery_ts, EventKind::TickDelivery(delivered_tick));
+                self.push_event(delivery_ts, EventKind::TickDelivery(delivered_tick));
 
-                    // Push next tick from this source to heap
-                    if let Some(next) = self.sources[idx].peek() {
-                        self.source_heap.push(PeekedEvent {
-                            ts: next.ts_exchange,
-                            source_idx: idx,
-                        });
-                    }
+                // Push next tick from this source to heap
+                if let Some(next) = self.sources[idx].peek() {
+                    self.source_heap.push(PeekedEvent {
+                        ts: next.ts_exchange,
+                        source_idx: idx,
+                    });
+                }
 
-                    continue;
+                continue;
             }
 
             // If we are here, either sources are empty or queue head is earlier than any source.
