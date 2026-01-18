@@ -165,3 +165,13 @@ For look-ahead tests, set a constant feed latency and assert the strategy’s ob
 - [ ] Benchmarks checked when performance-sensitive code changed.
 - [ ] `fmt/clippy` (and `ruff` if present) are clean.
 - [ ] `docs/PLAN.md` updated with progress and notes.
+
+---
+
+## Agentic Workflow
+
+1. **Consultation**: Refer to `CODEX_CLI.md` and discuss implementation details/strategy with `codex`.
+2. **Implementation**: Create a feature branch and develop using TDD (Test-Driven Development).
+3. **Benchmarking**: After implementation, refer to `README.md` to run benchmarks and save results in `benchmarks`.
+4. **Pull Request**: Commit and push changes, then create a PR.
+5. **Code Review**: After creating the PR, refer to `CODEX_CLI.md` to request a code review from `codex`.

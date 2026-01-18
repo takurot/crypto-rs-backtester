@@ -348,3 +348,107 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - Upload Criterion reports as CI artifacts for each run.
     - Keep scheduled benchmark runs (weekly) for baseline tracking; avoid hard performance gates unless methodology is robust.
     - **Deliverable**: Performance trends are visible and regressions are easier to catch.
+
+---
+
+## Phase 6: Performance Optimizations (Future)
+**Goal**: Maximize throughput via compiler tuning, data structure improvements, Python FFI reduction, and CPU-aware optimizations—preserving determinism and correctness.
+
+### 6.1 Compiler & Build Optimizations
+- [x] **6.1.1 LTO and Codegen Tuning**
+    - Add release profile with:
+      - `lto = "fat"` (or `"thin"` for faster builds)
+      - `codegen-units = 1`
+      - `opt-level = 3`
+      - `panic = "abort"`
+    - Optional: `RUSTFLAGS="-C target-cpu=native"` for CPU-specific optimizations (note: reduces portability).
+    - **Deliverable**: 10-20% throughput improvement with no code changes.
+    - **Suggested benches**: Compare `cargo bench` before/after profile changes.
+
+### 6.2 Data Structure Optimizations
+- [ ] **6.2.1 FxHashMap / Vec for Hot Lookups** `[Depends on 1.2.2]`
+    - Replace `BTreeMap` with `FxHashMap` or `Vec` for `exchanges`, `order_symbol_by_id`, `MarketView.last_trade_by_symbol`.
+    - For dense sequential IDs (e.g., `order_id`), use `Vec<Option<u32>>` for O(1) direct indexing.
+    - For sparse lookups (e.g., `symbol_id` → Exchange), use `FxHashMap` or small `Vec` with linear scan.
+    - Preserve deterministic iteration where needed via sorted keys or auxiliary Vec.
+    - **Deliverable**: O(1) vs O(log n) lookups; 5-15% improvement for order-heavy workloads.
+    - **Suggested tests**:
+        - `test_engine_determinism_with_vec_lookup()`
+
+- [ ] **6.2.2 Pre-allocate & Reuse Buffers**
+    - Pre-allocate `tick_buffer`, `report_buffer`, and other hot `Vec` allocations.
+    - Reuse allocations via `Vec::clear()` instead of creating new Vecs per step (e.g., `fills`, `trade_fills` in `Engine::step`).
+    - **Deliverable**: Reduced allocation overhead in batch mode and long-running backtests.
+
+- [ ] **6.2.3 EventKind Size Optimization**
+    - Analyze enum size with `std::mem::size_of` and consider boxing large variants.
+
+- [ ] **6.2.4 Order Bucket Indexing for Fill Checks** `[Depends on 1.2.3]`
+    - Current `ExchangeSimulator::on_trade` scans all orders for each trade tick (O(orders × ticks)).
+    - Implement price+side bucket: `HashMap<(i64, Side), Vec<u64>>` mapping (price, opposite_side) → order_ids.
+    - On trade, only check orders at matching price level.
+    - **Deliverable**: Dramatic reduction in fill-check iterations; 10-50x speedup for order-heavy strategies.
+    - **Suggested tests**:
+        - `test_order_bucket_fill_equivalence()`
+
+- [ ] **6.2.5 Min-Heap for Multi-Symbol Source Selection** `[Depends on 5.2]`
+    - Current `Engine::step` scans all sources to find minimum `ts_exchange` (O(N) per step).
+    - Use a min-heap of `(ts_exchange, source_idx)` for O(log N) selection.
+    - Maintain determinism via stable tie-breaking on `source_idx`.
+    - **Deliverable**: Scales better with many symbols (>8).
+    - **Suggested benches**:
+        - `bench_engine_16_symbols_with_heap_selection()`
+    - **Deliverable**: Smaller event queue memory footprint, better cache utilization.
+
+### 6.3 Python FFI Optimizations
+- [ ] **6.3.1 Default to Arrow Ingestion Path** `[Depends on 5.1]`
+    - Make `run_arrow` the default path; deprecate `schedule_ticks_from_python_polars`.
+    - Current dict/list-based ingestion is very slow (DataFrame → dict → list → row access).
+    - Pass Polars → Arrow C stream directly to `ArrowTickSource`.
+    - **Deliverable**: 5-10x faster data ingestion for large datasets.
+
+- [ ] **6.3.2 Arrow-Based Tick Batches for Strategy Callbacks** `[Depends on 5.1]`
+    - Replace per-tick dict creation with Arrow RecordBatch in `on_ticks`.
+    - Python strategy receives columnar arrays (numpy/pyarrow, zero-copy).
+    - **Deliverable**: 20-30% reduction in Python FFI overhead.
+    - **Suggested tests**:
+        - Python E2E: `test_e2e_strategy_arrow_batch_callback()`
+
+- [ ] **6.3.3 Structured Tick Objects (dataclass/namedtuple)** `[Depends on 2.1.2]`
+    - Use Python `dataclass` or `namedtuple` instead of `dict` for tick objects.
+    - Faster instantiation and attribute access.
+    - **Deliverable**: Lower per-tick object creation cost.
+
+- [ ] **6.3.4 Cache Column Arrays in ArrowTickSource** `[Depends on 5.1]`
+    - Current `read_tick_at` calls `column_by_name` and `downcast_ref` per row.
+    - Cache column array references once per batch, access via `arr.value(idx)` only.
+    - **Deliverable**: Significant reduction in per-tick overhead for Arrow ingestion.
+    - **Suggested code location**: `backtester-core/src/tick_source.rs`
+
+### 6.4 Incremental Statistics
+- [ ] **6.4.1 Streaming Stats Accumulation** `[Depends on 5.4]`
+    - Implement `IncrementalStats` struct that updates on each fill/PnL event.
+    - Avoid post-hoc O(n) scan in `calculate_stats()`.
+    - **Deliverable**: Constant-time stats retrieval; enables `TradeLogMode::SummaryOnly`.
+    - **Suggested tests**:
+        - `test_incremental_stats_matches_batch_calculation()`
+
+### 6.5 SIMD & Vectorized Computation
+- [ ] **6.5.1 SIMD Stats Calculation (Optional)**
+    - Use `std::simd` (nightly) or `wide`/`ultraviolet` crate for equity curve prefix sum, Sharpe/Sortino calculation.
+    - **Deliverable**: 2-5x faster stats for large trade logs.
+    - **Suggested benches**:
+        - `bench_stats_simd_vs_scalar()`
+
+### 6.6 Parallel Execution
+- [ ] **6.6.1 Rayon-Based Parallel Sweeps** `[Depends on 5.5]`
+    - Use `rayon::par_iter` for multi-core parameter sweeps.
+    - Ensure thread-local RNG seeding for determinism.
+    - **Deliverable**: Linear speedup with core count.
+
+### 6.7 Cache & Memory Optimizations
+- [ ] **6.7.1 Struct Layout Analysis**
+    - Profile cache behavior with `perf` or similar tools.
+    - Reorder struct fields for better cache locality.
+    - Consider `#[repr(C)]` for predictable layout.
+    - **Deliverable**: Reduced cache misses in hot loops.
