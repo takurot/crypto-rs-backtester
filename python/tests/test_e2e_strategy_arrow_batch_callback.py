@@ -28,7 +28,7 @@ def test_e2e_strategy_arrow_batch_callback():
         "price": [100 for _ in range(n)],
         "qty": [1 for _ in range(n)],
         "side": [1 for _ in range(n)],
-    }).lazy()
+    }).with_columns(pl.col("side").cast(pl.Int8)).lazy()
 
     strategy = ArrowBatchStrategy()
     
