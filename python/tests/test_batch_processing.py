@@ -61,9 +61,11 @@ class _OrderUpdateWakeRecorder:
 
         # Submit a buy order on the first wakeup only.
         if len(self.tick_wake_ts) == 1:
-            # ticks is now an Arrow RecordBatch, access columns by name
-            price_col = ticks.column("price")
-            qty_col = ticks.column("qty")
+            # ticks is now an Arrow RecordBatch, access columns by index
+            price_idx = ticks.schema.get_field_index("price")
+            qty_idx = ticks.schema.get_field_index("qty")
+            price_col = ticks.column(price_idx)
+            qty_col = ticks.column(qty_idx)
             ctx.submit_order(
                 symbol_id=1,
                 side=1,

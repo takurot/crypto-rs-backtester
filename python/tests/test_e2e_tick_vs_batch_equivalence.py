@@ -43,11 +43,17 @@ class _TickRecorder:
     def on_ticks(self, ticks, ctx) -> None:  # noqa: ANN001
         # ticks is an Arrow RecordBatch, convert each row to a Tick
         n = ticks.num_rows
-        ts_col = ticks.column("ts_exchange")
-        sym_col = ticks.column("symbol_id")
-        price_col = ticks.column("price")
-        qty_col = ticks.column("qty")
-        side_col = ticks.column("side")
+        ts_idx = ticks.schema.get_field_index("ts_exchange")
+        sym_idx = ticks.schema.get_field_index("symbol_id")
+        price_idx = ticks.schema.get_field_index("price")
+        qty_idx = ticks.schema.get_field_index("qty")
+        side_idx = ticks.schema.get_field_index("side")
+
+        ts_col = ticks.column(ts_idx)
+        sym_col = ticks.column(sym_idx)
+        price_col = ticks.column(price_idx)
+        qty_col = ticks.column(qty_idx)
+        side_col = ticks.column(side_idx)
         for i in range(n):
             self.ticks.append(Tick(
                 ts_exchange=int(ts_col[i].as_py()),

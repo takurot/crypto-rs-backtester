@@ -77,25 +77,29 @@ impl CachedBatch {
         let side = {
             let side_col = batch.column_by_name("side").expect("missing side");
             match side_col.data_type() {
-                arrow::datatypes::DataType::Int8 => side_col
-                    .as_any()
-                    .downcast_ref::<Int8Array>()
-                    .expect("side not Int8")
-                    .clone(),
+                arrow::datatypes::DataType::Int8 => {
+                    let arr = side_col
+                        .as_any()
+                        .downcast_ref::<Int8Array>()
+                        .expect("side not Int8");
+                    if arr.null_count() > 0 {
+                         panic!("side column contains nulls");
+                    }
+                    arr.clone()
+                },
                 arrow::datatypes::DataType::Int16 => {
                     let arr = side_col
                         .as_any()
                         .downcast_ref::<Int16Array>()
                         .expect("side not Int16");
+                    if arr.null_count() > 0 {
+                         panic!("side column contains nulls");
+                    }
                     let mut builder = Int8Builder::with_capacity(arr.len());
                     for i in 0..arr.len() {
-                        if arr.is_null(i) {
-                            builder.append_null();
-                        } else {
-                            let v = arr.value(i);
-                            let v8 = i8::try_from(v).expect("side out of i8 range");
-                            builder.append_value(v8);
-                        }
+                        let v = arr.value(i);
+                        let v8 = i8::try_from(v).expect("side out of i8 range");
+                        builder.append_value(v8);
                     }
                     builder.finish()
                 }
@@ -104,15 +108,14 @@ impl CachedBatch {
                         .as_any()
                         .downcast_ref::<Int32Array>()
                         .expect("side not Int32");
+                    if arr.null_count() > 0 {
+                         panic!("side column contains nulls");
+                    }
                     let mut builder = Int8Builder::with_capacity(arr.len());
                     for i in 0..arr.len() {
-                        if arr.is_null(i) {
-                            builder.append_null();
-                        } else {
-                            let v = arr.value(i);
-                            let v8 = i8::try_from(v).expect("side out of i8 range");
-                            builder.append_value(v8);
-                        }
+                        let v = arr.value(i);
+                        let v8 = i8::try_from(v).expect("side out of i8 range");
+                        builder.append_value(v8);
                     }
                     builder.finish()
                 }
@@ -121,15 +124,14 @@ impl CachedBatch {
                         .as_any()
                         .downcast_ref::<Int64Array>()
                         .expect("side not Int64");
+                    if arr.null_count() > 0 {
+                         panic!("side column contains nulls");
+                    }
                     let mut builder = Int8Builder::with_capacity(arr.len());
                     for i in 0..arr.len() {
-                        if arr.is_null(i) {
-                            builder.append_null();
-                        } else {
-                            let v = arr.value(i);
-                            let v8 = i8::try_from(v).expect("side out of i8 range");
-                            builder.append_value(v8);
-                        }
+                        let v = arr.value(i);
+                        let v8 = i8::try_from(v).expect("side out of i8 range");
+                        builder.append_value(v8);
                     }
                     builder.finish()
                 }
