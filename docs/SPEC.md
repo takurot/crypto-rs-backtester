@@ -501,6 +501,71 @@ CI SHOULD publish benchmark results as artifacts (and optionally post summaries 
 - Optional scheduled runs (e.g., weekly) for baseline tracking.
 - Avoid hard gating on noisy microbenchmarks unless a robust methodology is established.
 
+### 6.7 Build & Compiler Optimizations
+The system SHOULD use optimized build profiles for release builds:
+
+```toml
+[profile.release]
+lto = "thin"           # Link-time optimization
+codegen-units = 1      # Single codegen unit for better optimization
+opt-level = 3          # Maximum optimization
+# panic = "abort"      # UNSAFE with PyO3 (causes interpreter crash on Rust panic)
+```
+
+- **Expected impact**: 10-20% throughput improvement over default release profile.
+- **Consideration**: Longer compile times; `panic="abort"` must be avoided for Python extension modules.
+
+### 6.8 Data Structure Performance Guidelines
+The following data structure choices SHOULD be considered for performance-critical paths:
+
+| Use Case | Recommended | Rationale |
+|----------|------------|-----------|
+| Symbol → Exchange lookup | `FxHashMap<u32, _>` or `Vec` | O(1) lookup; small key |
+| Order ID → Symbol routing | `Vec<Option<u32>>` | O(1) direct index for dense sequential IDs |
+| Event queue | `BinaryHeap` | O(log n) push/pop; stable ordering |
+| Order book (L2) | `BTreeMap<i64, i64>` | Ordered traversal for best bid/ask |
+| Batch buffers | `Vec::with_capacity(N)` | Pre-allocate to avoid resizing |
+| Orders by price (fill check) | `HashMap<(price, side), Vec<order_id>>` | O(1) bucket lookup on trade |
+
+**Order Fill Check Optimization**: The `ExchangeSimulator::on_trade` function SHOULD NOT scan all orders for each trade. Instead, maintain a price+side bucket index:
+```rust
+// Index: (price, opposite_side) -> order_ids
+orders_by_price: HashMap<(i64, Side), Vec<u64>>
+
+fn on_trade(&mut self, trade: Tick) -> Vec<OrderReport> {
+    let bucket = self.orders_by_price.get(&(trade.price, trade.side.opposite()));
+    // Only check orders in the matching bucket
+}
+```
+
+**Multi-Symbol Source Selection**: When multiple `TickSource` streams are active, the engine SHOULD use a min-heap for O(log N) source selection instead of O(N) linear scan:
+```rust
+// (ts_exchange, source_idx) for stable ordering
+source_heap: BinaryHeap<Reverse<(i64, usize)>>
+```
+
+**Determinism Note**: When using `FxHashMap`, iteration order is not deterministic. If deterministic iteration is required (e.g., for logging or reproducibility), sort keys explicitly or maintain a separate ordered `Vec`.
+
+### 6.9 Python FFI Performance
+To minimize Python↔Rust boundary overhead:
+
+- **Batch callbacks preferred**: `on_ticks(batch)` over `on_tick(tick)`.
+- **Arrow-based data transfer**: Use Arrow RecordBatch for tick data instead of Python dicts.
+- **Large result export**: Return trades/equity as Arrow arrays, not Python lists.
+
+```python
+# Preferred: Arrow-based callback (future)
+def on_ticks_arrow(self, batch: pa.RecordBatch, ctx):
+    prices = batch["price"].to_numpy()  # Zero-copy
+
+# Current: Dict-based callback
+def on_ticks(self, ticks: list[dict], ctx):
+    for tick in ticks:
+        price = tick["price"]
+```
+
+**Target overhead**: < 20µs per batched callback (excluding user strategy code).
+
 ## 7. Testing Requirements
 
 ### 7.1 Unit Tests
@@ -564,6 +629,15 @@ fn bench_python_callback_batch(c: &mut Criterion) { ... }
 - [ ] Interpolated latency from pcap
 - [ ] Reg NMS / SIP simulation
 - [ ] Live trading adapter (same strategy code)
+
+### Phase 6: Performance Optimizations (Future)
+- [ ] Compiler tuning (LTO, codegen-units, panic=abort)
+- [ ] FxHashMap for hot lookups (exchanges, orders)
+- [ ] Arrow-based Python callbacks (zero-copy tick batches)
+- [ ] Incremental statistics accumulation
+- [ ] SIMD-accelerated stats (Sharpe, drawdown)
+- [ ] Rayon parallel parameter sweeps
+- [ ] Cache-friendly struct layouts
 
 ## Appendix A: Fixed-Point Arithmetic
 
