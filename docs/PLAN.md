@@ -401,25 +401,25 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Deliverable**: Smaller event queue memory footprint, better cache utilization.
 
 ### 6.3 Python FFI Optimizations
-- [ ] **6.3.1 Default to Arrow Ingestion Path** `[Depends on 5.1]`
+- [x] **6.3.1 Default to Arrow Ingestion Path** `[Depends on 5.1]`
     - Make `run_arrow` the default path; deprecate `schedule_ticks_from_python_polars`.
     - Current dict/list-based ingestion is very slow (DataFrame → dict → list → row access).
     - Pass Polars → Arrow C stream directly to `ArrowTickSource`.
     - **Deliverable**: 5-10x faster data ingestion for large datasets.
 
-- [ ] **6.3.2 Arrow-Based Tick Batches for Strategy Callbacks** `[Depends on 5.1]`
+- [x] **6.3.2 Arrow-Based Tick Batches for Strategy Callbacks** `[Depends on 5.1]`
     - Replace per-tick dict creation with Arrow RecordBatch in `on_ticks`.
     - Python strategy receives columnar arrays (numpy/pyarrow, zero-copy).
     - **Deliverable**: 20-30% reduction in Python FFI overhead.
     - **Suggested tests**:
         - Python E2E: `test_e2e_strategy_arrow_batch_callback()`
 
-- [ ] **6.3.3 Structured Tick Objects (dataclass/namedtuple)** `[Depends on 2.1.2]`
+- [x] **6.3.3 Structured Tick Objects (dataclass/namedtuple)** `[Depends on 2.1.2]`
     - Use Python `dataclass` or `namedtuple` instead of `dict` for tick objects.
     - Faster instantiation and attribute access.
     - **Deliverable**: Lower per-tick object creation cost.
 
-- [ ] **6.3.4 Cache Column Arrays in ArrowTickSource** `[Depends on 5.1]`
+- [x] **6.3.4 Cache Column Arrays in ArrowTickSource** `[Depends on 5.1]`
     - Current `read_tick_at` calls `column_by_name` and `downcast_ref` per row.
     - Cache column array references once per batch, access via `arr.value(idx)` only.
     - **Deliverable**: Significant reduction in per-tick overhead for Arrow ingestion.
