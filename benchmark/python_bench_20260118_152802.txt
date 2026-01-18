@@ -1,0 +1,11 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.14.2, pytest-9.0.2, pluggy-1.6.0
+benchmark: 5.2.3 (defaults: timer=time.perf_counter disable_gc=False min_rounds=5 min_time=0.000005 max_time=1.0 calibration_precision=10 warmup=False warmup_iterations=100000)
+rootdir: /Volumes/Storage/src/crypto-rs-backtester
+configfile: pyproject.toml
+plugins: benchmark-5.2.3
+collected 18 items / 17 deselected / 1 selected
+
+python/tests/test_bench_python_batch_callback_overhead.py .              [100%]
+
+======================= 1 passed, 17 deselected in 1.87s =======================

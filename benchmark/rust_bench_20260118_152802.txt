@@ -1,0 +1,77 @@
+   Compiling backtester-core v0.1.0 (/Volumes/Storage/src/crypto-rs-backtester/backtester-core)
+    Finished `bench` profile [optimized] target(s) in 28.45s
+     Running unittests src/lib.rs (target/release/deps/backtester_core-162228f8c52d9ab9)
+
+running 29 tests
+test account::tests::test_funding_applied_at_scheduled_ts_exchange ... ignored
+test engine::tests::test_engine_order_lifecycle_cleanup ... ignored
+test engine::tests::test_engine_run_smoke_deterministic_sequence ... ignored
+test engine::tests::test_engine_streaming_tick_source_equivalence_to_materialized ... ignored
+test engine::tests::test_funding_applied_at_scheduled_ts_exchange ... ignored
+test engine::tests::test_marketview_no_lookahead_with_feed_latency ... ignored
+test event_queue::tests::test_event_ordering_same_ts_sim_uses_stable_tiebreak ... ignored
+test event_queue::tests::test_event_queue_tiebreak_stable ... ignored
+test event_queue::tests::test_global_event_queue_orders_by_ts_sim_then_tiebreak ... ignored
+test exchange_simulator::tests::test_exchange_cancel_transitions_to_pending_cancel ... ignored
+test exchange_simulator::tests::test_exchange_submit_transitions_to_pending_new ... ignored
+test exchange_simulator::tests::test_pending_cancel_can_fill_before_cancel_ack ... ignored
+test exchange_simulator::tests::test_queue_conservative_user_is_last_in_queue ... ignored
+test fixtures::tests::test_fixtures_smoke_builders ... ignored
+test latency_model::tests::test_latency_lognormal_is_reproducible_under_seed ... ignored
+test orderbook_l2::tests::test_orderbook_l2_apply_update_and_best_bid_ask ... ignored
+test orderbook_l2::tests::test_orderbook_l2_remove_level_with_qty_zero ... ignored
+test queue_model::tests::test_queue_volume_clock_fills_when_cum_volume_exceeds_queue_pos ... ignored
+test rng::tests::test_reproducible_with_seed ... ignored
+test stats::tests::test_stats_funding_pnl_timeseries ... ignored
+test stats::tests::test_stats_max_drawdown_matches_reference ... ignored
+test stats::tests::test_stats_summary_only_matches_full_log_for_small_input ... ignored
+test stats::tests::test_stats_total_pnl_fixed_point_consistency ... ignored
+test stats::tests::test_stats_win_rate_and_profit_factor ... ignored
+test stats::tests::test_trade_log_ring_buffer_caps_size ... ignored
+test tick_source::tests::test_arrow_tick_source_reads_batch_correctly ... ignored
+test tick_source::tests::test_arrow_tick_source_reads_int64_side ... ignored
+test types::tests::test_fixed_point_roundtrip_io_only ... ignored
+test types::tests::test_order_state_machine_basic_invariants ... ignored
+
+test result: ok. 0 passed; 0 failed; 29 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running benches/bench_core.rs (target/release/deps/bench_core-b1e24afde7d917da)
+Gnuplot not found, using plotters backend
+Benchmarking bench_event_loop_1m_ticks
+Benchmarking bench_event_loop_1m_ticks: Warming up for 3.0000 s
+Benchmarking bench_event_loop_1m_ticks: Collecting 10 samples in estimated 3.8514 s (30 iterations)
+Benchmarking bench_event_loop_1m_ticks: Analyzing
+bench_event_loop_1m_ticks
+                        time:   [134.10 ms 141.57 ms 150.25 ms]
+                        change: [-11.935% -3.7876% +4.5316%] (p = 0.43 > 0.05)
+                        No change in performance detected.
+
+Benchmarking bench_orderbook_apply_l2_1m_updates
+Benchmarking bench_orderbook_apply_l2_1m_updates: Warming up for 3.0000 s
+Benchmarking bench_orderbook_apply_l2_1m_updates: Collecting 10 samples in estimated 4.0334 s (110 iterations)
+Benchmarking bench_orderbook_apply_l2_1m_updates: Analyzing
+bench_orderbook_apply_l2_1m_updates
+                        time:   [38.579 ms 39.950 ms 41.447 ms]
+                        change: [-5.0617% -0.3169% +4.5989%] (p = 0.90 > 0.05)
+                        No change in performance detected.
+
+Benchmarking bench_engine_e2e_tick_4x250k
+Benchmarking bench_engine_e2e_tick_4x250k: Warming up for 3.0000 s
+Benchmarking bench_engine_e2e_tick_4x250k: Collecting 10 samples in estimated 4.3918 s (20 iterations)
+Benchmarking bench_engine_e2e_tick_4x250k: Analyzing
+bench_engine_e2e_tick_4x250k
+                        time:   [218.77 ms 245.71 ms 276.18 ms]
+                        change: [+8.7323% +22.640% +39.300%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Benchmarking bench_engine_e2e_batch_4x250k
+Benchmarking bench_engine_e2e_batch_4x250k: Warming up for 3.0000 s
+Benchmarking bench_engine_e2e_batch_4x250k: Collecting 10 samples in estimated 3.6453 s (20 iterations)
+Benchmarking bench_engine_e2e_batch_4x250k: Analyzing
+bench_engine_e2e_batch_4x250k
+                        time:   [171.92 ms 177.22 ms 185.49 ms]
+                        change: [-8.0071% -4.0062% +1.1441%] (p = 0.13 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+
