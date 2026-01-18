@@ -27,22 +27,22 @@ class _RoundTripStrategy:
         self.submitted_buy = False
         self.submitted_sell = False
 
-    def on_tick(self, tick: dict, ctx) -> None:  # noqa: ANN001
+    def on_tick(self, tick, ctx) -> None:  # noqa: ANN001
         if not self.submitted_buy:
             self.submitted_buy = True
             ctx.submit_order(
-                symbol_id=int(tick["symbol_id"]),
+                symbol_id=tick.symbol_id,
                 side=1,  # buy
-                price=int(tick["price"]),
-                qty=int(tick["qty"]),
+                price=tick.price,
+                qty=tick.qty,
             )
 
-    def on_order_update(self, report: dict, ctx) -> None:  # noqa: ANN001
+    def on_order_update(self, report, ctx) -> None:  # noqa: ANN001
         # After the BUY is filled, submit a SELL @ 101 to close and realize PnL.
-        if report.get("status") == "Filled" and not self.submitted_sell:
+        if report.status == "Filled" and not self.submitted_sell:
             self.submitted_sell = True
             ctx.submit_order(
-                symbol_id=int(report["symbol_id"]),
+                symbol_id=report.symbol_id,
                 side=-1,  # sell
                 price=101_00000000,
                 qty=1_00000000,

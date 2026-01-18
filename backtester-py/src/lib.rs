@@ -119,6 +119,21 @@ impl PyOrderReport {
             self.remaining_qty
         )
     }
+
+    /// Dict-like get method for backward compatibility
+    fn get(&self, key: &str, default: Option<PyObject>) -> PyResult<PyObject> {
+        Python::with_gil(|py| match key {
+            "order_id" => Ok(self.order_id.into_py(py)),
+            "symbol_id" => Ok(self.symbol_id.into_py(py)),
+            "status" => Ok(self.status.clone().into_py(py)),
+            "last_fill_qty" => Ok(self.last_fill_qty.into_py(py)),
+            "last_fill_price" => Ok(self.last_fill_price.into_py(py)),
+            "filled_qty" => Ok(self.filled_qty.into_py(py)),
+            "remaining_qty" => Ok(self.remaining_qty.into_py(py)),
+            "reason" => Ok(self.reason.clone().into_py(py)),
+            _ => Ok(default.unwrap_or_else(|| py.None())),
+        })
+    }
 }
 
 #[pyclass]

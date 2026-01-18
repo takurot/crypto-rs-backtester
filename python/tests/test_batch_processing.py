@@ -54,21 +54,24 @@ class _OrderUpdateWakeRecorder:
     def __init__(self) -> None:
         self.tick_wake_ts: list[int] = []
         self.order_update_wake_ts: list[int] = []
-        self.seen_reports: list[dict] = []
+        self.seen_reports: list = []
 
-    def on_ticks(self, ticks: list[dict], ctx) -> None:  # noqa: ANN001
+    def on_ticks(self, ticks, ctx) -> None:  # noqa: ANN001
         self.tick_wake_ts.append(int(ctx.ts_local()))
 
         # Submit a buy order on the first wakeup only.
         if len(self.tick_wake_ts) == 1:
+            # ticks is now an Arrow RecordBatch, access columns by name
+            price_col = ticks.column("price")
+            qty_col = ticks.column("qty")
             ctx.submit_order(
                 symbol_id=1,
                 side=1,
-                price=int(ticks[0]["price"]),
-                qty=int(ticks[0]["qty"]),
+                price=int(price_col[0].as_py()),
+                qty=int(qty_col[0].as_py()),
             )
 
-    def on_order_updates(self, reports: list[dict], ctx) -> None:  # noqa: ANN001
+    def on_order_updates(self, reports, ctx) -> None:  # noqa: ANN001
         self.order_update_wake_ts.append(int(ctx.ts_local()))
         self.seen_reports.extend(reports)
 
