@@ -3,6 +3,7 @@
 
 # Python
 /.venv/
+/.venv_e2e/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
@@ -25,3 +26,4 @@ python/rust_backtester/*.dll
 
 # Docs
 docs/START.txt
+review/
