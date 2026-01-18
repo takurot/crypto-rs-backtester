@@ -640,7 +640,7 @@ fn simd_sum_f64_from_i64(pnl: &[i64]) -> f64 {
             chunk[2] as f64,
             chunk[3] as f64,
         ]);
-        sum_vec = sum_vec + v;
+        sum_vec += v;
     }
     let mut sum = simd_reduce_sum(sum_vec);
     for &x in chunks.remainder() {
@@ -661,7 +661,7 @@ fn simd_sum_sq_diff(pnl: &[i64], mean: f64) -> f64 {
             chunk[3] as f64,
         ]);
         let d = v - mean_vec;
-        sum_vec = sum_vec + d * d;
+        sum_vec += d * d;
     }
     let mut sum = simd_reduce_sum(sum_vec);
     for &x in chunks.remainder() {
@@ -683,7 +683,7 @@ fn simd_sum_downside_sq(pnl: &[i64]) -> f64 {
             chunk[3] as f64,
         ]);
         let neg = v.min(zero);
-        sum_vec = sum_vec + neg * neg;
+        sum_vec += neg * neg;
     }
     let mut sum = simd_reduce_sum(sum_vec);
     for &x in chunks.remainder() {
