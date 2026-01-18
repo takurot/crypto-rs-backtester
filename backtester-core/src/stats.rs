@@ -132,13 +132,15 @@ impl IncrementalStats {
         }
     }
 
-    fn on_pnl(&mut self, ts: TsExchangeNs, pnl: i64) {
+    fn on_pnl(&mut self, ts: TsExchangeNs, pnl: i64, is_trade: bool) {
         self.total_pnl = self.total_pnl.saturating_add(pnl);
-        if pnl > 0 {
-            self.gross_profit = self.gross_profit.saturating_add(pnl);
-            self.win_count += 1;
-        } else if pnl < 0 {
-            self.gross_loss = self.gross_loss.saturating_add(pnl);
+        if is_trade {
+            if pnl > 0 {
+                self.gross_profit = self.gross_profit.saturating_add(pnl);
+                self.win_count += 1;
+            } else if pnl < 0 {
+                self.gross_loss = self.gross_loss.saturating_add(pnl);
+            }
         }
 
         // PnL series stats (Sharpe/Sortino).
@@ -171,7 +173,7 @@ impl IncrementalStats {
         }
 
         let dd = (self.peak_equity - self.equity) as f64 / self.peak_equity as f64;
-        let dd_pct = dd * 100.0;
+        let dd_pct = (dd * 100.0).min(100.0);
         if dd_pct > self.max_drawdown_pct {
             self.max_drawdown_pct = dd_pct;
             self.max_drawdown_duration = ts.saturating_sub(self.peak_ts);
@@ -283,7 +285,7 @@ impl TradeLog {
             }
             self.pnl_history.push((event.ts_exchange, event.pnl));
         }
-        self.update_incremental_pnl(event.ts_exchange, event.pnl);
+        self.update_incremental_pnl(event.ts_exchange, event.pnl, false);
     }
 
     /// Update stats from a realized PnL delta (from trade).
@@ -291,14 +293,14 @@ impl TradeLog {
         if self.mode != TradeLogMode::None {
             self.pnl_history.push((ts, pnl));
         }
-        self.update_incremental_pnl(ts, pnl);
+        self.update_incremental_pnl(ts, pnl, true);
     }
 
-    fn update_incremental_pnl(&mut self, ts: TsExchangeNs, pnl: i64) {
+    fn update_incremental_pnl(&mut self, ts: TsExchangeNs, pnl: i64, is_trade: bool) {
         if self.mode == TradeLogMode::None {
             return;
         }
-        self.incremental.on_pnl(ts, pnl);
+        self.incremental.on_pnl(ts, pnl, is_trade);
     }
 
     pub fn fills_iter(&self) -> Box<dyn Iterator<Item = &TradeFill> + '_> {
@@ -533,7 +535,7 @@ pub fn max_drawdown_pct_and_duration(equity_curve: &[(TsExchangeNs, i64)]) -> (f
         }
         let dd = (peak_eq - eq) as f64 / peak_eq as f64;
         if dd > max_dd {
-            max_dd = dd;
+            max_dd = dd.min(1.0);
             max_dd_dur = ts.saturating_sub(peak_ts);
         }
     }
@@ -674,19 +676,22 @@ mod tests {
         }
 
         let mut total_pnl: i64 = 0;
-        let mut gross_profit: i64 = 0;
-        let mut gross_loss: i64 = 0;
-        let mut win_count: u64 = 0;
         let mut pnl_series: Vec<i64> = Vec::with_capacity(all_pnl_deltas.len());
 
         for (_ts, d) in &all_pnl_deltas {
             total_pnl = total_pnl.saturating_add(*d);
             pnl_series.push(*d);
-            if *d > 0 {
-                gross_profit = gross_profit.saturating_add(*d);
+        }
+
+        let mut gross_profit: i64 = 0;
+        let mut gross_loss: i64 = 0;
+        let mut win_count: u64 = 0;
+        for d in &trade_deltas {
+            if d.pnl > 0 {
+                gross_profit = gross_profit.saturating_add(d.pnl);
                 win_count += 1;
-            } else if *d < 0 {
-                gross_loss = gross_loss.saturating_add(*d);
+            } else if d.pnl < 0 {
+                gross_loss = gross_loss.saturating_add(d.pnl);
             }
         }
 
@@ -785,6 +790,31 @@ mod tests {
     }
 
     #[test]
+    fn test_stats_max_drawdown_clamped_to_100() {
+        let curve = vec![(0_i64, 10), (10, -5)];
+        let (dd, dur) = max_drawdown_pct_and_duration(&curve);
+        assert!((dd - 100.0).abs() < 1e-12, "dd={dd}");
+        assert_eq!(dur, 10);
+    }
+
+    #[test]
+    fn test_stats_max_drawdown_peak_nonpositive_is_zero() {
+        let mut log = TradeLog::new(TradeLogMode::SummaryOnly);
+        log.push_pnl_event(PnlEvent {
+            ts_exchange: 10,
+            pnl: -10_00000000,
+        });
+        log.push_pnl_event(PnlEvent {
+            ts_exchange: 20,
+            pnl: -5_00000000,
+        });
+
+        let stats = calculate_stats(&log);
+        assert_eq!(stats.max_drawdown, 0.0);
+        assert_eq!(stats.max_drawdown_duration, 0);
+    }
+
+    #[test]
     fn test_stats_funding_pnl_timeseries() {
         let mut log = TradeLog::default();
         log.push_pnl_event(PnlEvent {
@@ -804,6 +834,37 @@ mod tests {
         assert_eq!(stats.total_pnl, 130_00000000);
         assert!((stats.max_drawdown - 20.0).abs() < 1e-12);
         assert_eq!(stats.max_drawdown_duration, 10);
+    }
+
+    #[test]
+    fn test_stats_win_rate_excludes_funding_pnl() {
+        let mut log = TradeLog::default();
+        log.push_fill(TradeFill {
+            ts_exchange: 10,
+            symbol_id: 1,
+            order_id: 1,
+            side: Side::Buy,
+            price: 100_00000000,
+            qty: 1_00000000,
+        });
+        log.push_fill(TradeFill {
+            ts_exchange: 11,
+            symbol_id: 1,
+            order_id: 2,
+            side: Side::Sell,
+            price: 110_00000000,
+            qty: 1_00000000,
+        });
+        log.push_pnl_delta(11, 10_00000000);
+        log.push_pnl_event(PnlEvent {
+            ts_exchange: 12,
+            pnl: 5_00000000,
+        });
+
+        let stats = calculate_stats(&log);
+        assert_eq!(stats.total_trades, 2);
+        assert_eq!(stats.win_rate, 0.5);
+        assert!(stats.profit_factor.is_infinite());
     }
 
     #[test]
@@ -986,6 +1047,84 @@ mod tests {
         log_summary.push_pnl_delta(2_000, 10_00000000);
         log_summary.push_pnl_delta(4_000, -5_00000000);
 
+        let actual = calculate_stats(&log_summary);
+
+        assert_eq!(actual.total_trades, expected.total_trades);
+        assert_eq!(actual.total_pnl, expected.total_pnl);
+        assert_eq!(actual.avg_trade_pnl, expected.avg_trade_pnl);
+        assert_eq!(actual.avg_holding_period, expected.avg_holding_period);
+        assert_eq!(actual.max_drawdown_duration, expected.max_drawdown_duration);
+        assert!((actual.win_rate - expected.win_rate).abs() < 1e-12);
+        assert!((actual.profit_factor - expected.profit_factor).abs() < 1e-12);
+        assert!((actual.sharpe_ratio - expected.sharpe_ratio).abs() < 1e-12);
+        assert!((actual.sortino_ratio - expected.sortino_ratio).abs() < 1e-12);
+        assert!((actual.max_drawdown - expected.max_drawdown).abs() < 1e-12);
+        assert!((actual.calmar_ratio - expected.calmar_ratio).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_incremental_stats_matches_batch_with_partials_and_flips() {
+        let fills = vec![
+            TradeFill {
+                ts_exchange: 1_000,
+                symbol_id: 1,
+                order_id: 1,
+                side: Side::Buy,
+                price: 100_00000000,
+                qty: 2_00000000,
+            },
+            TradeFill {
+                ts_exchange: 2_000,
+                symbol_id: 1,
+                order_id: 2,
+                side: Side::Sell,
+                price: 110_00000000,
+                qty: 1_00000000,
+            },
+            TradeFill {
+                ts_exchange: 3_000,
+                symbol_id: 1,
+                order_id: 3,
+                side: Side::Buy,
+                price: 105_00000000,
+                qty: 1_00000000,
+            },
+            TradeFill {
+                ts_exchange: 4_000,
+                symbol_id: 1,
+                order_id: 4,
+                side: Side::Sell,
+                price: 95_00000000,
+                qty: 3_00000000,
+            },
+            TradeFill {
+                ts_exchange: 5_000,
+                symbol_id: 1,
+                order_id: 5,
+                side: Side::Buy,
+                price: 90_00000000,
+                qty: 1_00000000,
+            },
+        ];
+
+        let deltas = pnl_deltas_from_fills(fills.iter());
+
+        let mut log_all = TradeLog::new(TradeLogMode::All);
+        for f in &fills {
+            log_all.push_fill(*f);
+        }
+        for d in &deltas {
+            log_all.push_pnl_delta(d.ts_exchange, d.pnl);
+        }
+        let expected = calculate_stats_batch(&log_all);
+
+        let mut log_summary = TradeLog::new(TradeLogMode::SummaryOnly);
+        for f in &fills {
+            log_summary.push_fill(*f);
+        }
+        for d in &deltas {
+            log_summary.push_pnl_delta(d.ts_exchange, d.pnl);
+        }
         let actual = calculate_stats(&log_summary);
 
         assert_eq!(actual.total_trades, expected.total_trades);
