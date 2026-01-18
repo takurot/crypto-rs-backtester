@@ -1,5 +1,5 @@
 use crate::types::{Side, Tick};
-use arrow::array::{Array, Int16Array, Int32Array, Int8Array, Int8Builder, Int64Array};
+use arrow::array::{Array, Int8Array, Int8Builder, Int16Array, Int32Array, Int64Array};
 use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::record_batch::RecordBatch;
 
