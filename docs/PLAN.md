@@ -337,7 +337,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
         - Rust: `test_trade_log_ring_buffer_caps_size()`
         - Rust: `test_stats_summary_only_matches_full_log_for_small_input()`
 
-- [ ] **5.5 Parallel Parameter Sweep Runner (Deterministic)** `[Depends on 2.1.2]`
+- [x] **5.5 Parallel Parameter Sweep Runner (Deterministic)** `[Depends on 2.1.2]`
     - Provide a batch API to run many independent backtests (parameter search) in parallel (Rust-side concurrency).
     - Derive per-run seeds deterministically from a base seed and input index; return results in stable input order.
     - **Deliverable**: Parameter sweeps scale across cores without losing reproducibility.
