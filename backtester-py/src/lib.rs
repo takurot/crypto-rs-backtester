@@ -107,6 +107,13 @@ impl PyOrderReport {
             )),
         })
     }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "OrderReport(order_id={}, symbol_id={}, status={}, last_fill_qty={}, filled_qty={}, remaining_qty={})",
+            self.order_id, self.symbol_id, self.status, self.last_fill_qty, self.filled_qty, self.remaining_qty
+        )
+    }
 }
 
 #[pyclass]
@@ -247,7 +254,7 @@ impl Backtester {
     pub fn run(&self, py: Python<'_>, strategy: Py<PyAny>) -> PyResult<BacktestResult> {
         let config = EngineConfig {
             feed_latency_ns: self.feed_latency_ns,
-            order_update_latency_ns: self.feed_latency_ns,
+            order_update_latency_ns: self.order_update_latency_ns,
             mode: match self.python_mode.as_str() {
                 "batch" => EngineMode::Batch,
                 _ => EngineMode::Tick,
