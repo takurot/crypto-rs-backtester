@@ -366,7 +366,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Suggested benches**: Compare `cargo bench` before/after profile changes.
 
 ### 6.2 Data Structure Optimizations
-- [ ] **6.2.1 FxHashMap / Vec for Hot Lookups** `[Depends on 1.2.2]`
+- [x] **6.2.1 FxHashMap / Vec for Hot Lookups** `[Depends on 1.2.2]`
     - Replace `BTreeMap` with `FxHashMap` or `Vec` for `exchanges`, `order_symbol_by_id`, `MarketView.last_trade_by_symbol`.
     - For dense sequential IDs (e.g., `order_id`), use `Vec<Option<u32>>` for O(1) direct indexing.
     - For sparse lookups (e.g., `symbol_id` → Exchange), use `FxHashMap` or small `Vec` with linear scan.
@@ -375,7 +375,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Suggested tests**:
         - `test_engine_determinism_with_vec_lookup()`
 
-- [ ] **6.2.2 Pre-allocate & Reuse Buffers**
+- [x] **6.2.2 Pre-allocate & Reuse Buffers**
     - Pre-allocate `tick_buffer`, `report_buffer`, and other hot `Vec` allocations.
     - Reuse allocations via `Vec::clear()` instead of creating new Vecs per step (e.g., `fills`, `trade_fills` in `Engine::step`).
     - **Deliverable**: Reduced allocation overhead in batch mode and long-running backtests.
@@ -383,7 +383,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
 - [ ] **6.2.3 EventKind Size Optimization**
     - Analyze enum size with `std::mem::size_of` and consider boxing large variants.
 
-- [ ] **6.2.4 Order Bucket Indexing for Fill Checks** `[Depends on 1.2.3]`
+- [x] **6.2.4 Order Bucket Indexing for Fill Checks** `[Depends on 1.2.3]`
     - Current `ExchangeSimulator::on_trade` scans all orders for each trade tick (O(orders × ticks)).
     - Implement price+side bucket: `HashMap<(i64, Side), Vec<u64>>` mapping (price, opposite_side) → order_ids.
     - On trade, only check orders at matching price level.
@@ -391,7 +391,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Suggested tests**:
         - `test_order_bucket_fill_equivalence()`
 
-- [ ] **6.2.5 Min-Heap for Multi-Symbol Source Selection** `[Depends on 5.2]`
+- [x] **6.2.5 Min-Heap for Multi-Symbol Source Selection** `[Depends on 5.2]`
     - Current `Engine::step` scans all sources to find minimum `ts_exchange` (O(N) per step).
     - Use a min-heap of `(ts_exchange, source_idx)` for O(log N) selection.
     - Maintain determinism via stable tie-breaking on `source_idx`.
