@@ -43,15 +43,15 @@ impl CachedBatch {
                 .expect("not Int64")
                 .clone()
         };
-        
+
         // Helper for optional columns or aliases
         let get_i64_opt = |name: &str| -> Option<Int64Array> {
-             batch.column_by_name(name).map(|c| {
-                 c.as_any()
-                  .downcast_ref::<Int64Array>()
-                  .expect("not Int64")
-                  .clone()
-             })
+            batch.column_by_name(name).map(|c| {
+                c.as_any()
+                    .downcast_ref::<Int64Array>()
+                    .expect("not Int64")
+                    .clone()
+            })
         };
 
         let ts_exchange = batch
@@ -64,7 +64,7 @@ impl CachedBatch {
             .clone();
 
         let price = get_i64("price");
-        
+
         let qty = batch
             .column_by_name("qty")
             .or_else(|| batch.column_by_name("size"))
@@ -160,8 +160,16 @@ impl ArrowTickSource {
         let side_val = batch.side.value(idx);
         let side = Side::try_from(side_val).expect("invalid side");
 
-        let seq = batch.seq.as_ref().map(|col| col.value(idx) as u64).unwrap_or(0);
-        let ts_local = batch.ts_local.as_ref().map(|col| col.value(idx)).unwrap_or(0);
+        let seq = batch
+            .seq
+            .as_ref()
+            .map(|col| col.value(idx) as u64)
+            .unwrap_or(0);
+        let ts_local = batch
+            .ts_local
+            .as_ref()
+            .map(|col| col.value(idx))
+            .unwrap_or(0);
 
         Tick {
             ts_exchange,
@@ -197,7 +205,7 @@ impl TickSource for ArrowTickSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Int64Builder, Int8Builder};
+    use arrow::array::{Int8Builder, Int64Builder};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::ffi_stream::FFI_ArrowArrayStream;
     use arrow::record_batch::RecordBatchIterator;

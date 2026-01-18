@@ -111,7 +111,12 @@ impl PyOrderReport {
     fn __repr__(&self) -> String {
         format!(
             "OrderReport(order_id={}, symbol_id={}, status={}, last_fill_qty={}, filled_qty={}, remaining_qty={})",
-            self.order_id, self.symbol_id, self.status, self.last_fill_qty, self.filled_qty, self.remaining_qty
+            self.order_id,
+            self.symbol_id,
+            self.status,
+            self.last_fill_qty,
+            self.filled_qty,
+            self.remaining_qty
         )
     }
 }
@@ -1019,7 +1024,6 @@ fn parse_polars_data(
     events.sort_by_key(|(ts, _)| *ts);
     Ok(events)
 }
-
 
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
