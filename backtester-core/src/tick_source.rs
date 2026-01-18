@@ -83,17 +83,17 @@ impl CachedBatch {
                         .downcast_ref::<Int8Array>()
                         .expect("side not Int8");
                     if arr.null_count() > 0 {
-                         panic!("side column contains nulls");
+                        panic!("side column contains nulls");
                     }
                     arr.clone()
-                },
+                }
                 arrow::datatypes::DataType::Int16 => {
                     let arr = side_col
                         .as_any()
                         .downcast_ref::<Int16Array>()
                         .expect("side not Int16");
                     if arr.null_count() > 0 {
-                         panic!("side column contains nulls");
+                        panic!("side column contains nulls");
                     }
                     let mut builder = Int8Builder::with_capacity(arr.len());
                     for i in 0..arr.len() {
@@ -109,7 +109,7 @@ impl CachedBatch {
                         .downcast_ref::<Int32Array>()
                         .expect("side not Int32");
                     if arr.null_count() > 0 {
-                         panic!("side column contains nulls");
+                        panic!("side column contains nulls");
                     }
                     let mut builder = Int8Builder::with_capacity(arr.len());
                     for i in 0..arr.len() {
@@ -125,7 +125,7 @@ impl CachedBatch {
                         .downcast_ref::<Int64Array>()
                         .expect("side not Int64");
                     if arr.null_count() > 0 {
-                         panic!("side column contains nulls");
+                        panic!("side column contains nulls");
                     }
                     let mut builder = Int8Builder::with_capacity(arr.len());
                     for i in 0..arr.len() {
