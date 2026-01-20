@@ -34,6 +34,7 @@ echo "Step 3: Merging profiles..."
 "$LLVM_PROFDATA" merge -o "$PGO_DATA/merged.profdata" "$PGO_DATA"
 
 echo "Step 4: Optimized build..."
-RUSTFLAGS="-Cprofile-use=$PGO_DATA/merged.profdata" cargo build --release -p backtester-core
+rm -rf target/release/deps/bench_core-*
+RUSTFLAGS="-Cprofile-use=$PGO_DATA/merged.profdata" cargo build --release -p backtester-core --bench bench_core
 
 echo "PGO optimized build complete."
