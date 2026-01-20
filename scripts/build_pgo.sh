@@ -20,12 +20,15 @@ rm -rf "$PGO_DATA"
 mkdir -p "$PGO_DATA"
 
 echo "Step 1: Instrumentation build..."
+rm -rf target/release/deps/bench_core-*
 RUSTFLAGS="-Cprofile-generate=$PGO_DATA" cargo build --release -p backtester-core --bench bench_core
 
 echo "Step 2: Profile generation (Running benchmarks)..."
 # Run a representative benchmark to generate profiles.
 # Adjust the filter to run enough logic to train the branch predictor.
-./target/release/deps/bench_core-* --bench bench_event_loop_1m_ticks --noplot --sample-size 10
+# Note: Use find to select the binary to avoid wildcard expansion issues if multiple exist.
+BENCH_BIN=$(find target/release/deps -name "bench_core-*" -type f ! -name "*.dSYM" -maxdepth 1 -perm +111 | head -n 1)
+"$BENCH_BIN" --noplot --sample-size 10 bench_event_loop_1m_ticks
 
 echo "Step 3: Merging profiles..."
 "$LLVM_PROFDATA" merge -o "$PGO_DATA/merged.profdata" "$PGO_DATA"
