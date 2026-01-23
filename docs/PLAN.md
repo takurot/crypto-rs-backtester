@@ -469,7 +469,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
 > Current throughput is below the 10M ticks/sec target. The following items target closing this gap.
 
 ### 7.1 Profile-Guided Optimization (PGO)
-- [ ] **7.1.1 PGO Build Pipeline**
+- [x] **7.1.1 PGO Build Pipeline**
     - Implement two-stage build: instrumentation run → optimized rebuild with profile data.
     - Use `RUSTFLAGS="-Cprofile-generate=..."` for instrumentation, then `-Cprofile-use=...` for final build.
     - Run representative workload (e.g., `cargo bench` or E2E test) for profile collection.
@@ -488,15 +488,17 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Notes**: Consider adding a `make pgo` or `just pgo` task for repeatability.
 
 ### 7.2 SIMD-Accelerated Event Processing
-- [ ] **7.2.1 AVX2/AVX-512 Tick Parsing**
+- [x] **7.2.1 AVX2/AVX-512 Tick Parsing**
     - Explore `std::simd` (nightly) or `pulp` crate for vectorized column iteration in `ArrowTickSource`.
     - Batch-decode multiple ticks' `ts_exchange`, `price`, `qty` columns in parallel.
     - **Deliverable**: Reduced per-tick overhead for Arrow ingestion.
+    - **Result**: ~20% regression with `wide` crate due to SoA->AoS scatter overhead. implementation reverted.
     - **Considerations**: AVX-512 may cause frequency throttling; benchmark on target hardware.
 
-- [ ] **7.2.2 SIMD-Accelerated EventQueue Operations**
+- [x] **7.2.2 SIMD-Accelerated EventQueue Operations**
     - Investigate SIMD-friendly priority queue implementations or batch insertion/extraction.
     - Consider using `packed_simd` or `wide` for min-heap comparisons when scanning multiple events.
+    - **Result**: Tested 4-ary heap. No significant improvement vs `std::BinaryHeap`. Implementation reverted.
     - **Deliverable**: Faster event scheduling for high-symbol-count backtests.
 
 ### 7.3 Memory Management Optimizations

@@ -351,6 +351,7 @@ dependencies = [
  "rust_decimal",
  "rustc-hash",
  "serde",
+ "smallvec",
  "thiserror",
  "wide",
 ]

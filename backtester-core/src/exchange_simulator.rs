@@ -1,4 +1,5 @@
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use std::collections::BTreeMap;
 
 use crate::orderbook_l2::OrderBookL2;
@@ -26,7 +27,7 @@ pub struct ExchangeSimulator<Q: QueueModel> {
     queue_model: Q,
     orders: BTreeMap<u64, LiveOrder<Q::State>>,
     /// Optimization: Index active orders by (price, side) to avoid scanning all orders on every trade.
-    buckets: FxHashMap<(i64, Side), Vec<u64>>,
+    buckets: FxHashMap<(i64, Side), SmallVec<[u64; 4]>>,
 }
 
 impl<Q: QueueModel> ExchangeSimulator<Q> {
@@ -169,7 +170,7 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
             // So we must copy the IDs.
             // Optimization: SmallVec or just collect to Reusable Buffer?
             // For now, simple Vec clone. It's u64s.
-            let order_ids: Vec<u64> = bucket.clone();
+            let order_ids: SmallVec<[u64; 4]> = bucket.clone();
 
             for order_id in order_ids {
                 // Get mutable reference to order
