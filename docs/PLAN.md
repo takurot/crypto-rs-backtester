@@ -455,3 +455,142 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - Consider `#[repr(C)]` for predictable layout.
     - **Deliverable**: Reduced cache misses in hot loops.
     - **Notes**: Reordered hot structs (`Tick`, `Order`, `L2Update`, `TradeFill`) and pinned layouts with `#[repr(C)]`; added size guards.
+
+---
+
+## Phase 7: Advanced Performance Optimizations (Future)
+**Goal**: Push throughput beyond 10M ticks/sec (SPEC target 6.3) via compiler-level and hardware-aware optimizations.
+
+> **Benchmark Baseline (2026-01-18)**:
+> - `bench_event_loop_1m_ticks`: ~139ms (~7.2M ticks/sec)
+> - `bench_engine_e2e_batch_4x250k`: ~169ms (~5.9M ticks/sec)
+> - SIMD Sharpe/Sortino: ~4x faster than scalar
+>
+> Current throughput is below the 10M ticks/sec target. The following items target closing this gap.
+
+### 7.1 Profile-Guided Optimization (PGO)
+- [ ] **7.1.1 PGO Build Pipeline**
+    - Implement two-stage build: instrumentation run → optimized rebuild with profile data.
+    - Use `RUSTFLAGS="-Cprofile-generate=..."` for instrumentation, then `-Cprofile-use=...` for final build.
+    - Run representative workload (e.g., `cargo bench` or E2E test) for profile collection.
+    - **Deliverable**: 5-15% throughput improvement with no code changes (per empirical PGO literature).
+    - **Suggested workflow**:
+        ```bash
+        # Step 1: Instrumentation build
+        RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" cargo build --release
+        # Step 2: Run workload
+        ./target/release/backtester-core bench_workload
+        # Step 3: Merge profiles
+        llvm-profdata merge -o /tmp/pgo-data/merged.profdata /tmp/pgo-data
+        # Step 4: Optimized build
+        RUSTFLAGS="-Cprofile-use=/tmp/pgo-data/merged.profdata" cargo build --release
+        ```
+    - **Notes**: Consider adding a `make pgo` or `just pgo` task for repeatability.
+
+### 7.2 SIMD-Accelerated Event Processing
+- [ ] **7.2.1 AVX2/AVX-512 Tick Parsing**
+    - Explore `std::simd` (nightly) or `pulp` crate for vectorized column iteration in `ArrowTickSource`.
+    - Batch-decode multiple ticks' `ts_exchange`, `price`, `qty` columns in parallel.
+    - **Deliverable**: Reduced per-tick overhead for Arrow ingestion.
+    - **Considerations**: AVX-512 may cause frequency throttling; benchmark on target hardware.
+
+- [ ] **7.2.2 SIMD-Accelerated EventQueue Operations**
+    - Investigate SIMD-friendly priority queue implementations or batch insertion/extraction.
+    - Consider using `packed_simd` or `wide` for min-heap comparisons when scanning multiple events.
+    - **Deliverable**: Faster event scheduling for high-symbol-count backtests.
+
+### 7.3 Memory Management Optimizations
+- [ ] **7.3.1 Arena Allocator for Hot Paths**
+    - Use `bumpalo` or `typed-arena` for per-step allocations (e.g., `tick_buffer`, `report_buffer`).
+    - Avoid `Vec::clear()` / re-push cycles; allocate from arena and reset per batch.
+    - **Deliverable**: Reduced allocator pressure and improved cache utilization.
+    - **Suggested tests**:
+        - `bench_engine_e2e_with_arena_allocator()`
+
+- [ ] **7.3.2 SmallVec for Order Buckets**
+    - Replace `Vec<u64>` in `ExchangeSimulator.buckets` with `SmallVec<[u64; 4]>` (inline storage for small buckets).
+    - Most price levels have few orders; avoid heap allocation for the common case.
+    - **Deliverable**: Reduced allocation overhead for order-heavy strategies.
+
+- [ ] **7.3.3 Object Pooling for Tick/Order Structs**
+    - Implement or use a pool allocator (e.g., `object-pool` crate) for frequently created/destroyed structs.
+    - Reuse `Tick`, `OrderReport`, and `Event` instances instead of allocating new ones per step.
+    - **Deliverable**: Lower GC pressure equivalent and improved throughput for long backtests.
+
+### 7.4 I/O & Data Pipeline Optimizations
+- [ ] **7.4.1 Memory-Mapped File Ingestion**
+    - For Parquet files, explore `memmap2` + Arrow IPC for zero-copy file access.
+    - Avoid `read()` syscalls; let the OS page in data as needed.
+    - **Deliverable**: Faster startup for large datasets; reduced memory footprint via demand paging.
+    - **Considerations**: May interact poorly with NUMA; benchmark on target hardware.
+
+- [ ] **7.4.2 Async I/O Overlap**
+    - Use `tokio::fs` or `io_uring` (Linux) to overlap disk reads with computation.
+    - Pre-fetch next batch while processing current batch (double-buffering).
+    - **Deliverable**: Hide I/O latency for disk-bound backtests.
+    - **Notes**: Requires careful integration to preserve determinism (I/O must not affect event ordering).
+
+- [ ] **7.4.3 Compressed Arrow Streams**
+    - Support LZ4/ZSTD-compressed Arrow IPC streams to reduce I/O bandwidth.
+    - Decompression can be faster than disk read for high-compression-ratio data.
+    - **Deliverable**: Faster ingestion for network or slow-disk scenarios.
+
+### 7.5 Branch Prediction & Micro-Optimizations
+- [ ] **7.5.1 Cold Path Annotations**
+    - Add `#[cold]` attribute to error-handling and logging paths.
+    - Add `#[inline(always)]` to hot inner-loop functions (e.g., `TickSource::next`, `EventQueue::pop`).
+    - **Deliverable**: Better branch prediction and instruction cache utilization.
+    - **Suggested locations**:
+        - `engine.rs::step()` inner loop
+        - `tick_source.rs::ArrowTickSource::read_tick_at()`
+        - `exchange_simulator.rs::on_trade()`
+
+- [ ] **7.5.2 Likely/Unlikely Hints**
+    - Use `std::intrinsics::likely`/`unlikely` (nightly) or `likely_stable` crate for hot branches.
+    - Mark common-case branches as likely (e.g., "order not filled" in `on_trade`).
+    - **Deliverable**: Reduced branch mispredictions.
+
+- [ ] **7.5.3 Loop Unrolling for Batch Processing**
+    - Manually unroll inner loops in `on_ticks` dispatch (e.g., process 4 ticks per iteration).
+    - Compiler may not unroll due to callback complexity.
+    - **Deliverable**: Reduced loop overhead for large batches.
+
+### 7.6 Parallel & Concurrent Optimizations
+- [ ] **7.6.1 Lock-Free Order Bucket Index**
+    - Replace `FxHashMap<(i64, Side), Vec<u64>>` with a lock-free concurrent map for parallel parameter sweeps.
+    - Use `dashmap` or `crossbeam-skiplist` if order bucket access becomes a contention point.
+    - **Deliverable**: Better scaling for multi-core sweeps with shared read patterns.
+    - **Notes**: Single-run backtests are single-threaded; this is for sweep scenarios.
+
+- [ ] **7.6.2 Chunked Parallel Stats Computation**
+    - For large trade logs (>100k fills), parallelize stats computation using `rayon::par_chunks`.
+    - Compute partial sums (Welford's algorithm) per chunk, then merge.
+    - **Deliverable**: 2-4x faster `calculate_stats()` for large result sets.
+
+### 7.7 Hardware-Specific Optimizations
+- [ ] **7.7.1 NUMA-Aware Memory Allocation**
+    - For multi-socket systems, use `numactl` or `hwloc`-aware allocators to pin memory near compute cores.
+    - Particularly important for large Arrow buffers in parameter sweeps.
+    - **Deliverable**: Reduced cross-socket memory latency.
+
+- [ ] **7.7.2 Cache Prefetching Hints**
+    - Use `std::intrinsics::prefetch_*` (nightly) or inline assembly to prefetch upcoming tick data.
+    - Prefetch next tick while processing current tick in the event loop.
+    - **Deliverable**: Reduced cache miss latency in tight loops.
+
+- [ ] **7.7.3 GPU-Accelerated Statistics (Optional)**
+    - For very large datasets (>10M trades), offload Sharpe/Sortino/equity curve computation to GPU via `wgpu` or `cuda-rs`.
+    - **Deliverable**: 10-100x speedup for stats on massive result sets.
+    - **Considerations**: Only worthwhile for research-heavy use cases; increases build complexity.
+
+### 7.8 Adaptive Runtime Tuning
+- [ ] **7.8.1 Auto-Tuning Batch Size**
+    - Dynamically adjust `max_batch_ns` based on observed throughput and Python callback latency.
+    - Start with a default, measure first N batches, then optimize.
+    - **Deliverable**: Optimal batch size for varying workloads without manual tuning.
+
+- [ ] **7.8.2 JIT-Compiled Strategy Expressions (Speculative)**
+    - For simple strategies (e.g., threshold-based), compile to native code at runtime using `cranelift` or `inkwell`.
+    - Eliminate Python FFI overhead for hot paths.
+    - **Deliverable**: Near-pure-Rust throughput for JIT-compatible strategies.
+    - **Notes**: High complexity; evaluate ROI before implementation.

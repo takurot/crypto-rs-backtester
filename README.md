@@ -161,6 +161,24 @@ cargo bench -p backtester-core --bench bench_core
 
 The E2E benches (`bench_engine_e2e_*`) measure both Tick and Batch modes under identical conditions. Synthetic data is deterministic and includes realistic order flow (opposite-side, same-price passive limit orders at a fixed interval).
 
+### Profile-Guided Optimization (PGO)
+
+To build with PGO for maximum performance (Linux/macOS):
+
+```bash
+# Requires llvm-profdata (part of LLVM tools)
+make pgo
+```
+
+This runs a 4-step pipeline:
+1. Instrumentation build
+2. Profile generation (runs benchmarks)
+3. Profile merge
+4. Optimized build using profiles
+
+Expected improvement: 5-15% throughput.
+
+
 ---
 
 ### Examples (example/)
