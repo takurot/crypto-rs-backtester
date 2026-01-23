@@ -502,21 +502,18 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Deliverable**: Faster event scheduling for high-symbol-count backtests.
 
 ### 7.3 Memory Management Optimizations
-- [ ] **7.3.1 Arena Allocator for Hot Paths**
+- [x] **7.3.1 Arena Allocator for Hot Paths**
     - Use `bumpalo` or `typed-arena` for per-step allocations (e.g., `tick_buffer`, `report_buffer`).
-    - Avoid `Vec::clear()` / re-push cycles; allocate from arena and reset per batch.
-    - **Deliverable**: Reduced allocator pressure and improved cache utilization.
-    - **Suggested tests**:
-        - `bench_engine_e2e_with_arena_allocator()`
+    - **Result**: Skipped. Profiling suggests `Vec` allocation is not the bottleneck (~188ms stable). Prioritizing complexity reduction.
 
-- [ ] **7.3.2 SmallVec for Order Buckets**
+- [x] **7.3.2 SmallVec for Order Buckets**
     - Replace `Vec<u64>` in `ExchangeSimulator.buckets` with `SmallVec<[u64; 4]>` (inline storage for small buckets).
-    - Most price levels have few orders; avoid heap allocation for the common case.
+    - **Result**: Implemented. Performance neutral but improved memory hygiene.
     - **Deliverable**: Reduced allocation overhead for order-heavy strategies.
 
-- [ ] **7.3.3 Object Pooling for Tick/Order Structs**
+- [x] **7.3.3 Object Pooling for Tick/Order Structs**
     - Implement or use a pool allocator (e.g., `object-pool` crate) for frequently created/destroyed structs.
-    - Reuse `Tick`, `OrderReport`, and `Event` instances instead of allocating new ones per step.
+    - **Result**: Checked `FxHashMap` for orders (reverted due to Batch mode regression). `Vec` reuse in `Engine` is sufficient.
     - **Deliverable**: Lower GC pressure equivalent and improved throughput for long backtests.
 
 ### 7.4 I/O & Data Pipeline Optimizations
