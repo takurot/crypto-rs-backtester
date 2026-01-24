@@ -562,10 +562,11 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Deliverable**: Better scaling for multi-core sweeps with shared read patterns.
     - **Notes**: Single-run backtests are single-threaded; this is for sweep scenarios.
 
-- [ ] **7.6.2 Chunked Parallel Stats Computation**
+- [x] **7.6.2 Chunked Parallel Stats Computation**
     - For large trade logs (>100k fills), parallelize stats computation using `rayon::par_chunks`.
     - Compute partial sums (Welford's algorithm) per chunk, then merge.
     - **Deliverable**: 2-4x faster `calculate_stats()` for large result sets.
+    - **Result**: Implemented using Rayon. `bench_stats_sharpe_parallel` (~371µs) is ~1.5x faster than SIMD (~587µs) and ~5.5x faster than scalar (~2072µs) for 1M items.
 
 ### 7.7 Hardware-Specific Optimizations
 - [ ] **7.7.1 NUMA-Aware Memory Allocation**
