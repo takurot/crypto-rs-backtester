@@ -5,8 +5,9 @@ use backtester_core::engine::{Context, Engine, EngineConfig, EngineMode, Strateg
 use backtester_core::latency_model::ConstantLatency;
 use backtester_core::queue_model::ConservativeQueue;
 use backtester_core::stats::{
-    sharpe_ratio_from_pnl_series, sharpe_ratio_from_pnl_series_simd, sortino_ratio_from_pnl_series,
-    sortino_ratio_from_pnl_series_simd,
+    sharpe_ratio_from_pnl_series, sharpe_ratio_from_pnl_series_parallel,
+    sharpe_ratio_from_pnl_series_simd, sortino_ratio_from_pnl_series,
+    sortino_ratio_from_pnl_series_parallel, sortino_ratio_from_pnl_series_simd,
 };
 use backtester_core::tick_source::TickSource;
 use backtester_core::types::{Order, OrderType, Tick};
@@ -51,7 +52,7 @@ fn bench_orderbook_apply_l2_1m_updates(c: &mut Criterion) {
     });
 }
 
-fn bench_stats_simd_vs_scalar(c: &mut Criterion) {
+fn bench_stats_simd_vs_scalar_vs_parallel(c: &mut Criterion) {
     let n = 1_000_000usize;
     let mut pnl = Vec::with_capacity(n);
     for i in 0..n {
@@ -70,6 +71,12 @@ fn bench_stats_simd_vs_scalar(c: &mut Criterion) {
     });
     c.bench_function("bench_stats_sortino_simd", |b| {
         b.iter(|| black_box(sortino_ratio_from_pnl_series_simd(&pnl)))
+    });
+    c.bench_function("bench_stats_sharpe_parallel", |b| {
+        b.iter(|| black_box(sharpe_ratio_from_pnl_series_parallel(&pnl)))
+    });
+    c.bench_function("bench_stats_sortino_parallel", |b| {
+        b.iter(|| black_box(sortino_ratio_from_pnl_series_parallel(&pnl)))
     });
 }
 
@@ -320,7 +327,7 @@ criterion_group!(
         .warm_up_time(Duration::from_secs(3));
     targets = bench_event_loop_1m_ticks,
               bench_orderbook_apply_l2_1m_updates,
-              bench_stats_simd_vs_scalar,
+              bench_stats_simd_vs_scalar_vs_parallel,
               bench_engine_e2e_multisymbol_tick,
               bench_engine_e2e_multisymbol_batch
 );

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
+use rayon::prelude::*;
 use wide::f64x4;
 
 use crate::types::{FixedPoint, Side, TsExchangeNs};
@@ -725,6 +726,67 @@ pub fn sortino_ratio_from_pnl_series_simd(pnl: &[i64]) -> f64 {
     mean / downside_std
 }
 
+/// Parallel Sharpe ratio calculation using Rayon.
+pub fn sharpe_ratio_from_pnl_series_parallel(pnl: &[i64]) -> f64 {
+    let n = pnl.len();
+    if n < 2 {
+        return 0.0;
+    }
+
+    let (sum, sum_sq) = pnl
+        .par_iter()
+        .map(|&x| {
+            let val = x as f64;
+            (val, val * val)
+        })
+        .reduce(
+            || (0.0, 0.0),
+            |acc, val| (acc.0 + val.0, acc.1 + val.1),
+        );
+
+    let mean = sum / n as f64;
+    // Variance = E[X^2] - (E[X])^2
+    // Var(sample) = (Sum(x^2) - n*mean^2) / (n - 1)
+    let numerator = sum_sq - (n as f64 * mean * mean);
+    // Ensure non-negative due to float precision
+    let var = numerator.max(0.0) / (n as f64 - 1.0);
+    let std = var.sqrt();
+
+    if std == 0.0 {
+        return 0.0;
+    }
+    mean / std
+}
+
+/// Parallel Sortino ratio calculation using Rayon.
+pub fn sortino_ratio_from_pnl_series_parallel(pnl: &[i64]) -> f64 {
+    let n = pnl.len();
+    if n < 2 {
+        return 0.0;
+    }
+
+    let (sum, downside_sq_sum) = pnl
+        .par_iter()
+        .map(|&x| {
+            let val = x as f64;
+            let d = if val < 0.0 { val * val } else { 0.0 };
+            (val, d)
+        })
+        .reduce(
+            || (0.0, 0.0),
+            |acc, val| (acc.0 + val.0, acc.1 + val.1),
+        );
+
+    let mean = sum / n as f64;
+    let downside_var = downside_sq_sum / n as f64;
+    let downside_std = downside_var.sqrt();
+
+    if downside_std == 0.0 {
+        return 0.0;
+    }
+    mean / downside_std
+}
+
 /// Compute full time-ordered PnL history (trades + events) from the log.
 pub fn full_pnl_history(trade_log: &TradeLog) -> Vec<(TsExchangeNs, i64)> {
     if trade_log.mode() == TradeLogMode::None {
@@ -756,8 +818,17 @@ pub fn calculate_stats(trade_log: &TradeLog) -> BacktestStats {
         0.0
     };
 
-    let sharpe = inc.sharpe_ratio();
-    let sortino = inc.sortino_ratio();
+    let pnl_history_len = trade_log.pnl_history().len();
+    let (sharpe, sortino) = if pnl_history_len > 10_000 {
+        // Use parallel implementation for large datasets
+        let pnl_vec: Vec<i64> = trade_log.pnl_history().iter().map(|&(_, pnl)| pnl).collect();
+        (
+            sharpe_ratio_from_pnl_series_parallel(&pnl_vec),
+            sortino_ratio_from_pnl_series_parallel(&pnl_vec),
+        )
+    } else {
+        (inc.sharpe_ratio(), inc.sortino_ratio())
+    };
     let max_dd_pct = inc.max_drawdown_pct;
     let max_dd_dur = inc.max_drawdown_duration;
 
@@ -1315,5 +1386,39 @@ mod tests {
         let simd = equity_curve_from_pnl_deltas_simd(&deltas);
 
         assert_eq!(simd, scalar);
+    }
+
+    #[test]
+    fn test_stats_parallel_matches_sequential() {
+        use rand::Rng;
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut pnl_series = Vec::with_capacity(100_000);
+        for _ in 0..100_000 {
+            // Random PnL between -1000 and +1000
+            pnl_series.push(rng.gen_range(-1000..=1000));
+        }
+
+        let scalar_sharpe = sharpe_ratio_from_pnl_series(&pnl_series);
+        let parallel_sharpe = sharpe_ratio_from_pnl_series_parallel(&pnl_series);
+
+        assert!(
+            (scalar_sharpe - parallel_sharpe).abs() < 1e-9,
+            "Sharpe mismatch: scalar={}, parallel={}",
+            scalar_sharpe,
+            parallel_sharpe
+        );
+
+        let scalar_sortino = sortino_ratio_from_pnl_series(&pnl_series);
+        let parallel_sortino = sortino_ratio_from_pnl_series_parallel(&pnl_series);
+
+        assert!(
+            (scalar_sortino - parallel_sortino).abs() < 1e-9,
+            "Sortino mismatch: scalar={}, parallel={}",
+            scalar_sortino,
+            parallel_sortino
+        );
     }
 }
