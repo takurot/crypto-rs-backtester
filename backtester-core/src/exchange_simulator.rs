@@ -1,3 +1,4 @@
+use likely_stable::{likely, unlikely};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
@@ -146,6 +147,7 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
     }
 
     /// Process a market trade tick and generate order reports for any fills.
+    #[inline(always)]
     pub fn on_trade(&mut self, trade: Tick, reports: &mut Vec<OrderReport>) {
         let queue_model = &mut self.queue_model;
 
@@ -181,7 +183,7 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
                     continue;
                 };
 
-                if o.remaining_qty <= 0 {
+                if unlikely(o.remaining_qty <= 0) {
                     continue;
                 }
                 if !matches!(
@@ -193,7 +195,7 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
 
                 let fill_qty =
                     queue_model.check_fill(&o.order, o.remaining_qty, &trade, &mut o.queue_state);
-                if fill_qty <= 0 {
+                if likely(fill_qty <= 0) {
                     continue;
                 }
 

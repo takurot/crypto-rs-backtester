@@ -210,6 +210,7 @@ impl ArrowTickSource {
         }
     }
 
+    #[inline(always)]
     fn read_tick_at(&self, batch: &CachedBatch, idx: usize) -> Tick {
         let ts_exchange = batch.ts_exchange.value(idx);
         let price = batch.price.value(idx);

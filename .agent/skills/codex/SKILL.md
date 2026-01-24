@@ -1,3 +1,11 @@
+---
+name: codex
+description: Guide for using Codex CLI for code reviews and specs.
+metadata:
+  owner: user
+  version: "0.1.0"
+---
+
 # Codex CLI 使い方（このリポジトリ向け）
 
 このドキュメントは、Codex CLI を使ってコードレビューや仕様相談を行うための最小ガイドです。
@@ -83,4 +91,3 @@ codex "prompt/SPEC.md を前提に、Yの仕様変更がテストに与える影
 ```bash
 echo "prompt/SPEC.md を前提に最小実装の手順を箇条書きで" | codex exec -
 ```
-
