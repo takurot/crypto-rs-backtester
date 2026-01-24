@@ -535,7 +535,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Deliverable**: Faster ingestion for network or slow-disk scenarios.
 
 ### 7.5 Branch Prediction & Micro-Optimizations
-- [ ] **7.5.1 Cold Path Annotations**
+- [x] **7.5.1 Cold Path Annotations**
     - Add `#[cold]` attribute to error-handling and logging paths.
     - Add `#[inline(always)]` to hot inner-loop functions (e.g., `TickSource::next`, `EventQueue::pop`).
     - **Deliverable**: Better branch prediction and instruction cache utilization.
@@ -544,10 +544,11 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
         - `tick_source.rs::ArrowTickSource::read_tick_at()`
         - `exchange_simulator.rs::on_trade()`
 
-- [ ] **7.5.2 Likely/Unlikely Hints**
+- [x] **7.5.2 Likely/Unlikely Hints**
     - Use `std::intrinsics::likely`/`unlikely` (nightly) or `likely_stable` crate for hot branches.
     - Mark common-case branches as likely (e.g., "order not filled" in `on_trade`).
     - **Deliverable**: Reduced branch mispredictions.
+    - **Result**: `bench_event_loop_1m_ticks` reduced from ~180ms to ~135ms (~25% speedup). E2E improved ~8%.
 
 - [ ] **7.5.3 Loop Unrolling for Batch Processing**
     - Manually unroll inner loops in `on_ticks` dispatch (e.g., process 4 ticks per iteration).

@@ -14,6 +14,7 @@ use crate::rng::make_small_rng;
 use crate::stats::{BacktestStats, TradeFill, TradeLog, TradeLogMode, calculate_stats};
 use crate::types::{FundingEvent, Order, OrderReport, Tick, TsLocalNs, TsSimNs};
 use rand::rngs::SmallRng;
+use likely_stable::{likely, unlikely};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineMode {
@@ -276,10 +277,11 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
         }
     }
 
+    #[inline(always)]
     pub fn step(&mut self) -> Option<Event> {
         // 1. Ingest from sources if they have events earlier than (or equal to) the queue head.
         loop {
-            if !self.is_source_heap_initialized {
+            if unlikely(!self.is_source_heap_initialized) {
                 self.source_heap.clear();
                 for (i, source) in self.sources.iter_mut().enumerate() {
                     if let Some(tick) = source.peek() {
@@ -296,7 +298,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
 
             // Check if we have a source event earlier than the queue
             if let Some(pe) = self.source_heap.peek()
-                && pe.ts <= next_queue_ts
+                && likely(pe.ts <= next_queue_ts)
             {
                 // We have a source event to process
                 let idx = pe.source_idx;
