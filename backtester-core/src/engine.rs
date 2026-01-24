@@ -13,8 +13,8 @@ use crate::queue_model::QueueModel;
 use crate::rng::make_small_rng;
 use crate::stats::{BacktestStats, TradeFill, TradeLog, TradeLogMode, calculate_stats};
 use crate::types::{FundingEvent, Order, OrderReport, Tick, TsLocalNs, TsSimNs};
-use rand::rngs::SmallRng;
 use likely_stable::{likely, unlikely};
+use rand::rngs::SmallRng;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineMode {

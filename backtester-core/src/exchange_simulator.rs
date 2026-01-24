@@ -1,7 +1,7 @@
+use likely_stable::{likely, unlikely};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
-use likely_stable::{likely, unlikely};
 
 use crate::orderbook_l2::OrderBookL2;
 use crate::queue_model::QueueModel;
