@@ -739,10 +739,7 @@ pub fn sharpe_ratio_from_pnl_series_parallel(pnl: &[i64]) -> f64 {
             let val = x as f64;
             (val, val * val)
         })
-        .reduce(
-            || (0.0, 0.0),
-            |acc, val| (acc.0 + val.0, acc.1 + val.1),
-        );
+        .reduce(|| (0.0, 0.0), |acc, val| (acc.0 + val.0, acc.1 + val.1));
 
     let mean = sum / n as f64;
     // Variance = E[X^2] - (E[X])^2
@@ -772,10 +769,7 @@ pub fn sortino_ratio_from_pnl_series_parallel(pnl: &[i64]) -> f64 {
             let d = if val < 0.0 { val * val } else { 0.0 };
             (val, d)
         })
-        .reduce(
-            || (0.0, 0.0),
-            |acc, val| (acc.0 + val.0, acc.1 + val.1),
-        );
+        .reduce(|| (0.0, 0.0), |acc, val| (acc.0 + val.0, acc.1 + val.1));
 
     let mean = sum / n as f64;
     let downside_var = downside_sq_sum / n as f64;
@@ -821,7 +815,11 @@ pub fn calculate_stats(trade_log: &TradeLog) -> BacktestStats {
     let pnl_history_len = trade_log.pnl_history().len();
     let (sharpe, sortino) = if pnl_history_len > 10_000 {
         // Use parallel implementation for large datasets
-        let pnl_vec: Vec<i64> = trade_log.pnl_history().iter().map(|&(_, pnl)| pnl).collect();
+        let pnl_vec: Vec<i64> = trade_log
+            .pnl_history()
+            .iter()
+            .map(|&(_, pnl)| pnl)
+            .collect();
         (
             sharpe_ratio_from_pnl_series_parallel(&pnl_vec),
             sortino_ratio_from_pnl_series_parallel(&pnl_vec),
