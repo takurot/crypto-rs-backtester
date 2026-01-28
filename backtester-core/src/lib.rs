@@ -12,6 +12,7 @@ pub mod stats;
 pub mod sweep;
 pub mod tick_source;
 pub mod types;
+pub mod io;
 
 pub use account::{Account, Position};
 pub use engine::{Context, Engine, EngineConfig, EngineMode, MarketView, Strategy};
