@@ -15,7 +15,7 @@ pub fn prefetch_read_data<T>(ptr: *const T) {
 
     #[cfg(target_arch = "x86_64")]
     unsafe {
-        use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+        use core::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
         _mm_prefetch(p, _MM_HINT_T0);
     }
 
