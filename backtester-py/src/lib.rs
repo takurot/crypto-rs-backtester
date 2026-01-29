@@ -472,12 +472,12 @@ impl Backtester {
         let stream_bound = stream.bind(py);
         let arrow_stream = get_arrow_stream(stream_bound)?;
 
-        // Wrap with AsyncBatchIter for I/O overlap (readahead=4 batches)
-        let async_stream = backtester_core::io::AsyncBatchIter::new(arrow_stream, 4);
-
         // For now, assume single stream with symbol_id=1.
         // TODO: support multi-stream or map metadata.
-        let source = ArrowTickSource::new(1, async_stream);
+        // Note: We currently do NOT use AsyncBatchIter here because calling PyArrow-backed
+        // streams from a background thread can be unsafe (GIL/refcounting) depending on the
+        // underlying implementation.
+        let source = ArrowTickSource::new(1, arrow_stream);
         engine.add_tick_source(Box::new(source));
 
         engine.run();
