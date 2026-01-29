@@ -1,11 +1,11 @@
-use backtester_core::io::AsyncBatchIter;
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use std::time::Duration;
-use arrow::record_batch::RecordBatch;
-use arrow::error::ArrowError;
-use std::sync::Arc;
 use arrow::array::Int64Array;
 use arrow::datatypes::{DataType, Field, Schema};
+use arrow::error::ArrowError;
+use arrow::record_batch::RecordBatch;
+use backtester_core::io::AsyncBatchIter;
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use std::sync::Arc;
+use std::time::Duration;
 
 // Simulated slow source
 struct MockSource {
@@ -23,7 +23,7 @@ impl Iterator for MockSource {
         }
         std::thread::sleep(self.delay); // Simulate I/O latency
         self.current += 1;
-        
+
         let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, false)]));
         let arr = Int64Array::from(vec![self.current as i64]);
         let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
@@ -40,12 +40,16 @@ fn bench_async_overlap(c: &mut Criterion) {
     // Async: 10ms per item (amortized).
     let delay = Duration::from_millis(10);
     let count = 10;
-    
+
     group.throughput(Throughput::Elements(count as u64));
 
     group.bench_function("serial_read_process", |b| {
         b.iter(|| {
-            let source = MockSource { count, delay, current: 0 };
+            let source = MockSource {
+                count,
+                delay,
+                current: 0,
+            };
             for _batch in source {
                 // Simulate processing
                 std::thread::sleep(delay);
@@ -55,7 +59,11 @@ fn bench_async_overlap(c: &mut Criterion) {
 
     group.bench_function("async_read_process", |b| {
         b.iter(|| {
-            let source = MockSource { count, delay, current: 0 };
+            let source = MockSource {
+                count,
+                delay,
+                current: 0,
+            };
             let async_iter = AsyncBatchIter::new(source, 2);
             for _batch in async_iter {
                 // Simulate processing
