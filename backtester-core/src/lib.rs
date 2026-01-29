@@ -4,6 +4,7 @@ pub mod event;
 pub mod event_queue;
 pub mod exchange_simulator;
 pub mod fixtures;
+pub mod io;
 pub mod latency_model;
 pub mod orderbook_l2;
 pub mod queue_model;

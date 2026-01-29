@@ -121,6 +121,7 @@ impl PyOrderReport {
     }
 
     /// Dict-like get method for backward compatibility
+    #[pyo3(signature = (key, default=None))]
     fn get(&self, key: &str, default: Option<PyObject>) -> PyResult<PyObject> {
         Python::with_gil(|py| match key {
             "order_id" => Ok(self.order_id.into_py(py)),
@@ -470,8 +471,12 @@ impl Backtester {
         // Zero-copy ingestion
         let stream_bound = stream.bind(py);
         let arrow_stream = get_arrow_stream(stream_bound)?;
+
         // For now, assume single stream with symbol_id=1.
         // TODO: support multi-stream or map metadata.
+        // Note: We currently do NOT use AsyncBatchIter here because calling PyArrow-backed
+        // streams from a background thread can be unsafe (GIL/refcounting) depending on the
+        // underlying implementation.
         let source = ArrowTickSource::new(1, arrow_stream);
         engine.add_tick_source(Box::new(source));
 

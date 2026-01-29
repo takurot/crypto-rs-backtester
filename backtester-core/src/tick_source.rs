@@ -1,6 +1,5 @@
 use crate::types::{Side, Tick};
 use arrow::array::{Array, Int8Array, Int8Builder, Int16Array, Int32Array, Int64Array};
-use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::record_batch::RecordBatch;
 
 /// A source of ticks for a single (exchange, symbol) stream.
@@ -154,16 +153,21 @@ impl CachedBatch {
     }
 }
 
-pub struct ArrowTickSource {
+use arrow::error::ArrowError;
+
+pub struct ArrowTickSource<I> {
     symbol_id: u32,
-    reader: ArrowArrayStreamReader,
+    reader: I,
     current_batch: Option<CachedBatch>,
     batch_idx: usize,
     next_tick: Option<Tick>,
 }
 
-impl ArrowTickSource {
-    pub fn new(symbol_id: u32, reader: ArrowArrayStreamReader) -> Self {
+impl<I> ArrowTickSource<I>
+where
+    I: Iterator<Item = Result<RecordBatch, ArrowError>> + Send,
+{
+    pub fn new(symbol_id: u32, reader: I) -> Self {
         let mut source = Self {
             symbol_id,
             reader,
@@ -242,7 +246,10 @@ impl ArrowTickSource {
     }
 }
 
-impl TickSource for ArrowTickSource {
+impl<I> TickSource for ArrowTickSource<I>
+where
+    I: Iterator<Item = Result<RecordBatch, ArrowError>> + Send,
+{
     fn peek(&mut self) -> Option<&Tick> {
         self.next_tick.as_ref()
     }
@@ -265,7 +272,7 @@ mod tests {
     use super::*;
     use arrow::array::{Int8Builder, Int64Builder};
     use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::ffi_stream::FFI_ArrowArrayStream;
+    use arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
     use arrow::record_batch::RecordBatchIterator;
     use std::sync::Arc;
 
