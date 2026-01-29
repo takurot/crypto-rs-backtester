@@ -576,10 +576,11 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - Particularly important for large Arrow buffers in parameter sweeps.
     - **Deliverable**: Reduced cross-socket memory latency.
 
-- [ ] **7.7.2 Cache Prefetching Hints**
+- [x] **7.7.2 Cache Prefetching Hints**
     - Use `std::intrinsics::prefetch_*` (nightly) or inline assembly to prefetch upcoming tick data.
     - Prefetch next tick while processing current tick in the event loop.
     - **Deliverable**: Reduced cache miss latency in tight loops.
+    - **Notes**: Implemented in `utils.rs` using `_mm_prefetch` (x86_64) and `prfm` (aarch64). Prefetches Arrow buffer memory 2 ticks ahead in `ArrowTickSource::read_tick_at`. PR #25.
 
 - [ ] **7.7.3 GPU-Accelerated Statistics (Optional)**
     - For very large datasets (>10M trades), offload Sharpe/Sortino/equity curve computation to GPU via `wgpu` or `cuda-rs`.

@@ -1,4 +1,5 @@
 use crate::types::{Side, Tick};
+use crate::utils::prefetch_read_data;
 use arrow::array::{Array, Int8Array, Int8Builder, Int16Array, Int32Array, Int64Array};
 use arrow::record_batch::RecordBatch;
 
@@ -216,6 +217,19 @@ where
 
     #[inline(always)]
     fn read_tick_at(&self, batch: &CachedBatch, idx: usize) -> Tick {
+        // Prefetch upcoming data (lookahead=2 is a heuristic)
+        // Use slice pointer directly to avoid prefetching stack temporaries
+        if idx + 2 < batch.num_rows {
+            let next = idx + 2;
+            // SAFETY: next < num_rows, so the pointer offset is within bounds.
+            unsafe {
+                prefetch_read_data(batch.ts_exchange.values().as_ptr().add(next));
+                prefetch_read_data(batch.price.values().as_ptr().add(next));
+                prefetch_read_data(batch.qty.values().as_ptr().add(next));
+                prefetch_read_data(batch.side.values().as_ptr().add(next));
+            }
+        }
+
         let ts_exchange = batch.ts_exchange.value(idx);
         let price = batch.price.value(idx);
         let qty = batch.qty.value(idx);
