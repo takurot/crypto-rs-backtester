@@ -1,5 +1,5 @@
 use crate::types::{Side, Tick};
-use arrow::array::{Array, Int16Array, Int32Array, Int64Array, Int8Array, Int8Builder};
+use arrow::array::{Array, Int8Array, Int8Builder, Int16Array, Int32Array, Int64Array};
 use arrow::record_batch::RecordBatch;
 
 /// A source of ticks for a single (exchange, symbol) stream.

@@ -121,6 +121,7 @@ impl PyOrderReport {
     }
 
     /// Dict-like get method for backward compatibility
+    #[pyo3(signature = (key, default=None))]
     fn get(&self, key: &str, default: Option<PyObject>) -> PyResult<PyObject> {
         Python::with_gil(|py| match key {
             "order_id" => Ok(self.order_id.into_py(py)),
@@ -470,7 +471,7 @@ impl Backtester {
         // Zero-copy ingestion
         let stream_bound = stream.bind(py);
         let arrow_stream = get_arrow_stream(stream_bound)?;
-        
+
         // Wrap with AsyncBatchIter for I/O overlap (readahead=4 batches)
         let async_stream = backtester_core::io::AsyncBatchIter::new(arrow_stream, 4);
 

@@ -4,6 +4,7 @@ pub mod event;
 pub mod event_queue;
 pub mod exchange_simulator;
 pub mod fixtures;
+pub mod io;
 pub mod latency_model;
 pub mod orderbook_l2;
 pub mod queue_model;
@@ -12,7 +13,6 @@ pub mod stats;
 pub mod sweep;
 pub mod tick_source;
 pub mod types;
-pub mod io;
 
 pub use account::{Account, Position};
 pub use engine::{Context, Engine, EngineConfig, EngineMode, MarketView, Strategy};

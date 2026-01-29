@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::path::Path;
-use std::sync::mpsc::{sync_channel, Receiver};
+use std::sync::mpsc::{Receiver, sync_channel};
 use std::thread;
 
 use arrow::error::ArrowError;
@@ -19,7 +19,10 @@ pub struct MmapCursor {
 
 impl MmapCursor {
     pub fn new(mmap: Arc<Mmap>) -> Self {
-        Self { inner: mmap, pos: 0 }
+        Self {
+            inner: mmap,
+            pos: 0,
+        }
     }
 }
 
@@ -31,7 +34,7 @@ impl Read for MmapCursor {
         }
         let remain = (len - self.pos) as usize;
         let to_read = std::cmp::min(remain, buf.len());
-        
+
         buf[..to_read].copy_from_slice(&self.inner[self.pos as usize..self.pos as usize + to_read]);
         self.pos += to_read as u64;
         Ok(to_read)
@@ -58,7 +61,7 @@ impl Seek for MmapCursor {
                 }
             }
         };
-        
+
         // Clamp to file size (standard behavior allows seeking past end, but let's stick to simple)
         // Actually standard Seek allows past end. But Read returns 0.
         self.pos = new_pos;
@@ -67,7 +70,7 @@ impl Seek for MmapCursor {
 }
 
 /// A loader that uses memory-mapping to read Arrow IPC streams or files.
-/// 
+///
 /// Note: This uses `StreamReader`, so it expects the Arrow IPC Stream format.
 /// If you have an Arrow IPC File (Random Access) format, use `FileReader` instead.
 pub struct MmapFileLoader {
@@ -80,7 +83,9 @@ impl MmapFileLoader {
         let file = File::open(path)?;
         // SAFETY: Only safe if the file is not modified while mapped.
         let mmap = unsafe { Mmap::map(&file)? };
-        Ok(Self { mmap: Arc::new(mmap) })
+        Ok(Self {
+            mmap: Arc::new(mmap),
+        })
     }
 
     /// Create an Arrow Stream Reader from the memory-mapped content.
@@ -133,8 +138,8 @@ impl Iterator for AsyncBatchIter {
         // block until next item is available
         match self.receiver.recv() {
             Ok(Some(item)) => Some(item),
-            Ok(None) => None,      // EOF signal
-            Err(_) => None,        // Sender hung up (shouldn't happen given logic above)
+            Ok(None) => None, // EOF signal
+            Err(_) => None,   // Sender hung up (shouldn't happen given logic above)
         }
     }
 }
@@ -195,7 +200,7 @@ mod tests {
 
         let count = 5;
         let delay = Duration::from_millis(50);
-        
+
         let iter = SlowIter {
             count,
             delay,
@@ -224,13 +229,21 @@ mod tests {
     fn test_async_batch_iter_ordering() {
         let count = 10;
         let delay = Duration::from_micros(100); // fast
-        let iter = SlowIter { count, delay, current: 0 };
+        let iter = SlowIter {
+            count,
+            delay,
+            current: 0,
+        };
         let async_iter = AsyncBatchIter::new(iter, 5);
 
         let mut next_val = 1;
         for item in async_iter {
             let batch = item.unwrap();
-            let arr = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+            let arr = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
             assert_eq!(arr.value(0), next_val);
             next_val += 1;
         }
