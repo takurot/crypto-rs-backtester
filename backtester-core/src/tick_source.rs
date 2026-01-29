@@ -272,7 +272,7 @@ mod tests {
     use super::*;
     use arrow::array::{Int8Builder, Int64Builder};
     use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::ffi_stream::FFI_ArrowArrayStream;
+    use arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
     use arrow::record_batch::RecordBatchIterator;
     use std::sync::Arc;
 
