@@ -218,12 +218,16 @@ where
     #[inline(always)]
     fn read_tick_at(&self, batch: &CachedBatch, idx: usize) -> Tick {
         // Prefetch upcoming data (lookahead=2 is a heuristic)
+        // Use slice pointer directly to avoid prefetching stack temporaries
         if idx + 2 < batch.num_rows {
             let next = idx + 2;
-            prefetch_read_data(&batch.ts_exchange.values()[next]);
-            prefetch_read_data(&batch.price.values()[next]);
-            prefetch_read_data(&batch.qty.values()[next]);
-            prefetch_read_data(&batch.side.values()[next]);
+            // SAFETY: next < num_rows, so the pointer offset is within bounds.
+            unsafe {
+                prefetch_read_data(batch.ts_exchange.values().as_ptr().add(next));
+                prefetch_read_data(batch.price.values().as_ptr().add(next));
+                prefetch_read_data(batch.qty.values().as_ptr().add(next));
+                prefetch_read_data(batch.side.values().as_ptr().add(next));
+            }
         }
 
         let ts_exchange = batch.ts_exchange.value(idx);
