@@ -616,7 +616,8 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
         // Auto-tuning (Phase 7.8.1) - only when enabled, to preserve determinism
         if self.config.mode == EngineMode::Batch && self.config.auto_tune && total_items > 0 {
             let duration = start.elapsed();
-            self.tuner.record_batch(duration.as_nanos() as i64, total_items);
+            self.tuner
+                .record_batch(duration.as_nanos() as i64, total_items);
             self.config.max_batch_ns = self.tuner.current_batch_ns();
         }
     }

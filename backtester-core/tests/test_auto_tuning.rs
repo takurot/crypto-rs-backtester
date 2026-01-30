@@ -11,7 +11,6 @@ impl Strategy for FastStrategy {
     fn on_order_update(&mut self, _: &OrderReport, _: &mut Context<'_>) {}
 }
 
-
 struct VecTickSource {
     ticks: Vec<Tick>,
     idx: usize,
@@ -64,14 +63,14 @@ fn test_engine_increases_batch_size_when_fast() {
     };
     // Tuner updates every 10 batches.
     // If we have very fast strategy, batch size should increase.
-    
+
     // We need enough ticks to trigger multiple batches.
     // Initially batch is 100us. Ticks are 1ms apart (see VecTickSource).
     // So 1 tick per batch?
     // Wait, if ticks are 1ms apart, and batch is 100us, we process 1 tick, then advance time.
     // To fill a batch we need ticks closer than batch size.
     // Let's make ticks 1us apart.
-    
+
     let n_ticks = 50000;
     let mut source = VecTickSource::new(n_ticks);
     // Overwrite ts to be dense
@@ -88,22 +87,28 @@ fn test_engine_increases_batch_size_when_fast() {
     // Wait, Engine does: config.max_batch_ns = tuner.current_batch_ns() AFTER first update.
     // But initially engine.config.max_batch_ns is what we passed (1_000_000).
     // Tuner.current is 100_000.
-    // So after first batch (update), config.max_batch_ns will snap to 100_000? 
+    // So after first batch (update), config.max_batch_ns will snap to 100_000?
     // Yes, Tuner starts at min.
-    
+
     engine.run();
 
     let final_batch = engine.config().max_batch_ns;
-    println!("Initial limit: {}, Final batch: {}", initial_batch, final_batch);
-    
+    println!(
+        "Initial limit: {}, Final batch: {}",
+        initial_batch, final_batch
+    );
+
     // It should have snapped to 100k, then increased.
     // 5000 ticks. 1us apart = 5ms total data.
     // If batch is 100us, we have 50 batches.
     // Tuner updates every 10 batches. So 5 updates.
     // Increase is ~100us per update.
     // Should end up around 500us - 600us.
-    
-    assert!(final_batch > 100_000, "Batch size should increase from min for fast strategy");
+
+    assert!(
+        final_batch > 100_000,
+        "Batch size should increase from min for fast strategy"
+    );
 }
 
 use std::thread;

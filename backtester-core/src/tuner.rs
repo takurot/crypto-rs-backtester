@@ -122,18 +122,18 @@ mod tests {
     fn test_batch_tuner_clamps_limits() {
         // min=1k, max=2k, initial=1k, target=100ns
         let mut tuner = BatchTuner::new(1_000, 2_000, 1_000, 100.0);
-        
+
         // Try to increase beyond max
         for _ in 0..100 {
             tuner.record_batch(1_000, 100); // 10ns latency (very fast)
         }
         assert_eq!(tuner.current_batch_ns(), 2_000);
 
-         // Try to decrease below min
-         tuner.current_batch_ns = 1_000;
-         for _ in 0..100 {
-             tuner.record_batch(1_000_000, 1); // 1ms latency (very slow)
-         }
-         assert_eq!(tuner.current_batch_ns(), 1_000);
+        // Try to decrease below min
+        tuner.current_batch_ns = 1_000;
+        for _ in 0..100 {
+            tuner.record_batch(1_000_000, 1); // 1ms latency (very slow)
+        }
+        assert_eq!(tuner.current_batch_ns(), 1_000);
     }
 }
