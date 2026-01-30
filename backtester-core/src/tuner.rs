@@ -17,12 +17,29 @@ pub struct BatchTuner {
 }
 
 impl BatchTuner {
-    pub fn new(min_batch_ns: i64, max_batch_ns_limit: i64, target_latency_per_tick_ns: f64) -> Self {
+    /// Create a new BatchTuner.
+    ///
+    /// * `min_batch_ns`: Minimum batch size (floor).
+    /// * `max_batch_ns_limit`: Maximum batch size (ceiling).
+    /// * `initial_batch_ns`: Starting batch size (will be clamped to [min, max]).
+    /// * `target_latency_per_tick_ns`: Target latency per tick in nanoseconds.
+    pub fn new(
+        min_batch_ns: i64,
+        max_batch_ns_limit: i64,
+        initial_batch_ns: i64,
+        target_latency_per_tick_ns: f64,
+    ) -> Self {
+        // Ensure min <= max constraint
+        let effective_min = min_batch_ns.min(max_batch_ns_limit);
+        let effective_max = min_batch_ns.max(max_batch_ns_limit);
+        // Clamp initial value to [min, max]
+        let initial = initial_batch_ns.clamp(effective_min, effective_max);
+
         Self {
-            min_batch_ns,
-            max_batch_ns_limit,
+            min_batch_ns: effective_min,
+            max_batch_ns_limit: effective_max,
             target_latency_per_tick_ns,
-            current_batch_ns: min_batch_ns,
+            current_batch_ns: initial,
             sample_count: 0,
         }
     }
@@ -41,7 +58,7 @@ impl BatchTuner {
         }
 
         self.sample_count += 1;
-        
+
         let latency_per_tick = batch_duration_ns as f64 / num_ticks as f64;
 
         // Tuning interval: adjust every 10 batches to avoid jitter.
@@ -57,7 +74,10 @@ impl BatchTuner {
         } else {
             // Latency is too high, decrease batch size (Multiplicative Decrease).
             self.current_batch_ns = (self.current_batch_ns as f64 * 0.8) as i64;
-            self.current_batch_ns = self.current_batch_ns.max(self.min_batch_ns);
+            // Clamp to [min, max]
+            self.current_batch_ns = self
+                .current_batch_ns
+                .clamp(self.min_batch_ns, self.max_batch_ns_limit);
         }
     }
 }
@@ -68,7 +88,8 @@ mod tests {
 
     #[test]
     fn test_batch_tuner_increases_when_latency_low() {
-        let mut tuner = BatchTuner::new(1_000, 10_000_000, 100.0); // 100ns per tick target
+        // min=1k, max=10M, initial=1k, target=100ns
+        let mut tuner = BatchTuner::new(1_000, 10_000_000, 1_000, 100.0);
         assert_eq!(tuner.current_batch_ns(), 1_000);
 
         // Record 10 batches with low latency (50ns per tick)
@@ -84,9 +105,8 @@ mod tests {
 
     #[test]
     fn test_batch_tuner_decreases_when_latency_high() {
-        let mut tuner = BatchTuner::new(100_000, 10_000_000, 100.0);
-        // Force initial state
-        tuner.current_batch_ns = 1_000_000;
+        // min=100k, max=10M, initial=1M, target=100ns
+        let mut tuner = BatchTuner::new(100_000, 10_000_000, 1_000_000, 100.0);
 
         // Record 10 batches with high latency (200ns per tick)
         for _ in 0..10 {
@@ -100,7 +120,8 @@ mod tests {
 
     #[test]
     fn test_batch_tuner_clamps_limits() {
-        let mut tuner = BatchTuner::new(1_000, 2_000, 100.0);
+        // min=1k, max=2k, initial=1k, target=100ns
+        let mut tuner = BatchTuner::new(1_000, 2_000, 1_000, 100.0);
         
         // Try to increase beyond max
         for _ in 0..100 {

@@ -34,6 +34,10 @@ pub struct EngineConfig {
     pub mode: EngineMode,
     /// Maximum batch duration in nanoseconds (Batch mode only).
     pub max_batch_ns: i64,
+    /// Enable auto-tuning of batch size (Batch mode only). When enabled, the engine
+    /// dynamically adjusts batch size based on processing latency, which may affect
+    /// determinism (same input may produce different results on different runs).
+    pub auto_tune: bool,
     /// RNG seed for all stochastic components owned by the engine.
     pub seed: u64,
     /// Trade log retention mode (Phase 5.4).
@@ -47,6 +51,7 @@ impl Default for EngineConfig {
             order_update_latency_ns: 0,
             mode: EngineMode::Tick,
             max_batch_ns: 0,
+            auto_tune: false,
             seed: 0,
             trade_log_mode: TradeLogMode::All,
         }
@@ -229,13 +234,14 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             reusable_fills: Vec::with_capacity(16),
             reusable_trade_fills: Vec::with_capacity(16),
             tuner: BatchTuner::new(
-                100_000,
+                100_000, // min: 100µs
                 if config.max_batch_ns > 0 {
                     config.max_batch_ns
                 } else {
-                    1_000_000_000
+                    1_000_000_000 // default max: 1s
                 },
-                500.0,
+                config.max_batch_ns, // initial value: use config value
+                500.0,               // target latency per tick: 500ns
             ),
         }
     }
@@ -607,8 +613,8 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
 
         self.handle_commands(ctx.into_commands(), ts_local);
 
-        // Auto-tuning (Phase 7.8.1)
-        if self.config.mode == EngineMode::Batch && total_items > 0 {
+        // Auto-tuning (Phase 7.8.1) - only when enabled, to preserve determinism
+        if self.config.mode == EngineMode::Batch && self.config.auto_tune && total_items > 0 {
             let duration = start.elapsed();
             self.tuner.record_batch(duration.as_nanos() as i64, total_items);
             self.config.max_batch_ns = self.tuner.current_batch_ns();

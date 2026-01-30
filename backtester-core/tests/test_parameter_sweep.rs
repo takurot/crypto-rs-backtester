@@ -103,6 +103,7 @@ fn test_parameter_sweep_parallel_ordered() {
         order_update_latency_ns: 0,
         mode: EngineMode::Tick,
         max_batch_ns: 0,
+        auto_tune: false,
         seed: 7,
         trade_log_mode: TradeLogMode::SummaryOnly,
     };
