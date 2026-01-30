@@ -249,6 +249,7 @@ fn bench_engine_e2e_multisymbol_tick(c: &mut Criterion) {
                 order_update_latency_ns: cfg.order_update_latency_ns,
                 mode: EngineMode::Tick,
                 max_batch_ns: 0,
+                auto_tune: false,
                 seed: 42,
                 trade_log_mode: TradeLogMode::All,
             };
@@ -292,6 +293,7 @@ fn bench_engine_e2e_multisymbol_batch(c: &mut Criterion) {
                 order_update_latency_ns: cfg.order_update_latency_ns,
                 mode: EngineMode::Batch,
                 max_batch_ns,
+                auto_tune: false,
                 seed: 42,
                 trade_log_mode: TradeLogMode::All,
             };
