@@ -589,10 +589,11 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Considerations**: Only worthwhile for research-heavy use cases; increases build complexity.
 
 ### 7.8 Adaptive Runtime Tuning
-- [ ] **7.8.1 Auto-Tuning Batch Size**
+- [x] **7.8.1 Auto-Tuning Batch Size**
     - Dynamically adjust `max_batch_ns` based on observed throughput and Python callback latency.
     - Start with a default, measure first N batches, then optimize.
     - **Deliverable**: Optimal batch size for varying workloads without manual tuning.
+    - **Result**: Implemented AIMD-based `BatchTuner` in `engine.rs`. Dynamically scales batch size (latency up to limit) when throughput is high, and throttles back when latency target is exceeded. Verified in `test_auto_tuning`.
 
 - [ ] **7.8.2 JIT-Compiled Strategy Expressions (Speculative)**
     - For simple strategies (e.g., threshold-based), compile to native code at runtime using `cranelift` or `inkwell`.

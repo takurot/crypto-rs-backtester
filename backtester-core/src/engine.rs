@@ -1,6 +1,7 @@
 use rustc_hash::FxHashMap;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::time::Instant;
 
 use crate::account::Account;
 use crate::event::{Event, EventId, EventKind};
@@ -12,6 +13,7 @@ use crate::latency_model::LatencyModel;
 use crate::queue_model::QueueModel;
 use crate::rng::make_small_rng;
 use crate::stats::{BacktestStats, TradeFill, TradeLog, TradeLogMode, calculate_stats};
+use crate::tuner::BatchTuner;
 use crate::types::{FundingEvent, Order, OrderReport, Tick, TsLocalNs, TsSimNs};
 use likely_stable::{likely, unlikely};
 use rand::rngs::SmallRng;
@@ -178,6 +180,7 @@ pub struct Engine<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> {
     report_buffer: Vec<OrderReport>,
     active_batch_timer_id: Option<u64>,
     next_timer_id: u64,
+    pending_wakeup: bool,
     // Phase 5.2: Streaming sources
     sources: Vec<Box<dyn TickSource>>,
     source_heap: BinaryHeap<PeekedEvent>,
@@ -187,9 +190,16 @@ pub struct Engine<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> {
     reusable_reports: Vec<OrderReport>,
     reusable_fills: Vec<(Order, i64, i64)>,
     reusable_trade_fills: Vec<TradeFill>,
+
+    // Auto-tuner (Phase 7.8.1)
+    tuner: BatchTuner,
 }
 
 impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
+    pub fn config(&self) -> &EngineConfig {
+        &self.config
+    }
+
     pub fn new(queue_model: Q, strategy: S, config: EngineConfig, latency_model: L) -> Self {
         Self {
             config,
@@ -211,12 +221,22 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             report_buffer: Vec::new(),
             active_batch_timer_id: None,
             next_timer_id: 1,
+            pending_wakeup: false,
             sources: Vec::new(),
             source_heap: BinaryHeap::new(),
             is_source_heap_initialized: false,
             reusable_reports: Vec::with_capacity(16),
             reusable_fills: Vec::with_capacity(16),
             reusable_trade_fills: Vec::with_capacity(16),
+            tuner: BatchTuner::new(
+                100_000,
+                if config.max_batch_ns > 0 {
+                    config.max_batch_ns
+                } else {
+                    1_000_000_000
+                },
+                500.0,
+            ),
         }
     }
 
@@ -521,10 +541,15 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             }
         }
 
-        if self.config.mode == EngineMode::Batch && wakeup_requested {
+        if self.config.mode == EngineMode::Batch && (wakeup_requested || self.pending_wakeup) {
             let next_ts = self.queue.peek().map(|e| e.ts_sim());
             if next_ts != Some(self.now_ts_sim) {
                 self.flush_strategy(self.now_ts_sim);
+                self.pending_wakeup = false;
+            } else {
+                // Cannot flush yet because events with same timestamp exist.
+                // Defer flush.
+                self.pending_wakeup = true;
             }
         }
 
@@ -560,6 +585,13 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
         // Any early flush invalidates the pending time-based wakeup timer.
         self.active_batch_timer_id = None;
 
+        let num_ticks = self.tick_buffer.len() as u64;
+        let num_reports = self.report_buffer.len() as u64; // Reports are lighter, but let's count them.
+        // Weight reports less? For simplicity treat 1 report ~= 1 tick for now.
+        let total_items = num_ticks + num_reports;
+
+        let start = Instant::now();
+
         let mut ctx = Context::new(ts_local, &self.market);
 
         if !self.tick_buffer.is_empty() {
@@ -574,6 +606,13 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
         }
 
         self.handle_commands(ctx.into_commands(), ts_local);
+
+        // Auto-tuning (Phase 7.8.1)
+        if self.config.mode == EngineMode::Batch && total_items > 0 {
+            let duration = start.elapsed();
+            self.tuner.record_batch(duration.as_nanos() as i64, total_items);
+            self.config.max_batch_ns = self.tuner.current_batch_ns();
+        }
     }
 }
 
