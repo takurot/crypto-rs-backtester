@@ -552,10 +552,11 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Deliverable**: Reduced branch mispredictions.
     - **Result**: `bench_event_loop_1m_ticks` reduced from ~180ms to ~135ms (~25% speedup). E2E improved ~8%.
 
-- [ ] **7.5.3 Loop Unrolling for Batch Processing**
+- [-] **7.5.3 Loop Unrolling for Batch Processing**
     - Manually unroll inner loops in `on_ticks` dispatch (e.g., process 4 ticks per iteration).
     - Compiler may not unroll due to callback complexity.
     - **Deliverable**: Reduced loop overhead for large batches.
+    - **Result**: Attempted but skipped. Manual unrolling (4x) caused ~10% regression (169ms -> 186ms) in `bench_engine_e2e_batch`. The compiler likely optimizes the simple loop better. Reverted to baseline.
 
 ### 7.6 Parallel & Concurrent Optimizations
 - [ ] **7.6.1 Lock-Free Order Bucket Index**
