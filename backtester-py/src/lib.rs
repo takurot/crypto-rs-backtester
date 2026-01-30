@@ -281,6 +281,7 @@ impl Backtester {
                 _ => EngineMode::Tick,
             },
             max_batch_ns: self.batch_ms.saturating_mul(1_000_000),
+            auto_tune: false,
             seed: self.seed,
             trade_log_mode: match self.trade_log_mode.to_lowercase().as_str() {
                 "all" => TradeLogMode::All,
@@ -374,6 +375,7 @@ impl Backtester {
                         _ => EngineMode::Tick,
                     },
                     max_batch_ns: self.batch_ms.saturating_mul(1_000_000),
+                    auto_tune: false,
                     // Deterministic seed derivation
                     seed: self.seed.wrapping_add(i as u64),
                     trade_log_mode: match self.trade_log_mode.to_lowercase().as_str() {
@@ -450,6 +452,7 @@ impl Backtester {
                 _ => EngineMode::Tick,
             },
             max_batch_ns: self.batch_ms.saturating_mul(1_000_000),
+            auto_tune: false,
             seed: self.seed,
             trade_log_mode: match self.trade_log_mode.to_lowercase().as_str() {
                 "all" => TradeLogMode::All,
