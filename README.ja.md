@@ -32,6 +32,14 @@ Rust × Python(Polars) で動く、研究者フレンドリーなティックレ
 
 ---
 
+### インストール
+
+```bash
+pip install crypto-rs-backtester
+```
+
+---
+
 ### インストールとビルド（開発）
 
 前提: Python 3.9+ / Rust ツールチェイン / maturin
