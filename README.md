@@ -43,6 +43,14 @@ See `docs/SPEC.md` for details.
 
 ---
 
+### Installation
+
+```bash
+pip install rust-backtester
+```
+
+---
+
 ### Install & Build (dev)
 
 Prerequisites: Python 3.9+ / Rust toolchain / maturin
