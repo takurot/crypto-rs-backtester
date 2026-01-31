@@ -11,14 +11,14 @@ A tick-level, high-precision backtester powered by Rust × Python (Polars), desi
 
 ---
 
-### 特長（現状の実装）
+### Key Highlights
 
 - Performant by design: Rust event-driven core with fixed-point arithmetic; Python focuses on research interface.
 - Zero-copy pipeline: Use Polars (Arrow) in Python and hand off to Rust with minimal copying.
 - Microstructure fidelity: Latency modeling, L2/L3 queue logic, and realistic race conditions (e.g., PendingCancel).
 - Determinism first: Seeded RNGs, stable tie-breaking for identical timestamps.
 
-詳細は `docs/SPEC.md` を参照してください。
+See `docs/SPEC.md` for details.
 
 ### Features (current state)
 
