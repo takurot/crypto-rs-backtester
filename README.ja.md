@@ -35,7 +35,7 @@ Rust × Python(Polars) で動く、研究者フレンドリーなティックレ
 ### インストール
 
 ```bash
-pip install rust-backtester
+pip install crypto-rs-backtester
 ```
 
 ---

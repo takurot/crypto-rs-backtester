@@ -46,7 +46,7 @@ See `docs/SPEC.md` for details.
 ### Installation
 
 ```bash
-pip install rust-backtester
+pip install crypto-rs-backtester
 ```
 
 ---
