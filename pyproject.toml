@@ -3,7 +3,7 @@ requires = ["maturin>=1.5,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "rust-backtester"
+name = "crypto-rs-backtester"
 version = "0.1.0"
 description = "Rust-based tick-level backtester (WIP)"
 readme = "README.md"
