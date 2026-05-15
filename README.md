@@ -2,6 +2,12 @@
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/takurot/crypto-rs-backtester/blob/main/example/colab_backtester_demo.ipynb)
 
+### Video
+
+[![Your Crypto Backtest Is Lying to You - Fix It with Rust | crypto-rs-backtester](https://i.ytimg.com/vi/uDZWLtjLWUI/hqdefault.jpg)](https://www.youtube.com/watch?v=uDZWLtjLWUI)
+
+[Your Crypto Backtest Is Lying to You - Fix It with Rust | crypto-rs-backtester](https://www.youtube.com/watch?v=uDZWLtjLWUI)
+
 Japanese version: see `README.ja.md`.
 
 A tick-level, high-precision backtester powered by Rust × Python (Polars), designed for researchers. WIP.
