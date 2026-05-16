@@ -260,8 +260,13 @@ impl Backtester {
         maker_fee_bps: i64,
         taker_fee_bps: i64,
         ring_buffer_size: usize,
-    ) -> Self {
-        Backtester {
+    ) -> PyResult<Self> {
+        if ring_buffer_size == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "ring_buffer_size must be >= 1",
+            ));
+        }
+        Ok(Backtester {
             data,
             feed_latency_ns,
             order_update_latency_ns,
@@ -272,7 +277,7 @@ impl Backtester {
             maker_fee_bps,
             taker_fee_bps,
             ring_buffer_size,
-        }
+        })
     }
 
     /// Minimal E2E "run" to validate packaging + determinism plumbing.
