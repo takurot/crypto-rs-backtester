@@ -214,6 +214,6 @@ mod tests {
         assert_eq!(size_of::<L2Update>(), 40);
         assert_eq!(size_of::<Order>(), 48);
         assert_eq!(size_of::<OrderReport>(), 64);
-        assert_eq!(size_of::<TradeFill>(), 40);
+        assert_eq!(size_of::<TradeFill>(), 48);
     }
 }

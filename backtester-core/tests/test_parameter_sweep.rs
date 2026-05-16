@@ -115,6 +115,7 @@ fn test_parameter_sweep_parallel_ordered() {
         auto_tune: false,
         seed: 7,
         trade_log_mode: TradeLogMode::SummaryOnly,
+        ..Default::default()
     };
     let latency = ConstantLatency {
         feed_latency_ns: 0,

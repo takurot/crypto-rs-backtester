@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 
 mod arrow_utils;
 
-use arrow::array::{ArrayRef, Int8Builder, Int64Builder, UInt32Builder, UInt64Builder};
+use arrow::array::{
+    ArrayRef, BooleanBuilder, Int8Builder, Int64Builder, UInt32Builder, UInt64Builder,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::pyarrow::ToPyArrow;
 use arrow::record_batch::RecordBatch;
@@ -146,6 +148,8 @@ pub struct Backtester {
     batch_ms: i64,
     seed: u64,
     trade_log_mode: String,
+    maker_fee_bps: i64,
+    taker_fee_bps: i64,
 }
 
 #[pyclass]
@@ -170,7 +174,7 @@ impl BacktestResult {
     }
 
     /// Return trades as a PyArrow-compatible dict of arrays for zero-copy access.
-    /// Schema: ts_exchange (i64), symbol_id (u32), order_id (u64), side (i8), price (i64), qty (i64)
+    /// Schema: ts_exchange (i64), symbol_id (u32), order_id (u64), side (i8), price (i64), qty (i64), fee (i64), is_taker (bool)
     pub fn trades_df<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let n = self.trades.len();
 
@@ -180,6 +184,8 @@ impl BacktestResult {
         let mut side_builder = Int8Builder::with_capacity(n);
         let mut price_builder = Int64Builder::with_capacity(n);
         let mut qty_builder = Int64Builder::with_capacity(n);
+        let mut fee_builder = Int64Builder::with_capacity(n);
+        let mut is_taker_builder = BooleanBuilder::with_capacity(n);
 
         for t in &self.trades {
             ts_builder.append_value(t.ts_exchange);
@@ -188,6 +194,8 @@ impl BacktestResult {
             side_builder.append_value(t.side.as_i8());
             price_builder.append_value(t.price);
             qty_builder.append_value(t.qty);
+            fee_builder.append_value(t.fee);
+            is_taker_builder.append_value(t.is_taker);
         }
 
         let ts_array: ArrayRef = Arc::new(ts_builder.finish());
@@ -196,6 +204,8 @@ impl BacktestResult {
         let side_array: ArrayRef = Arc::new(side_builder.finish());
         let price_array: ArrayRef = Arc::new(price_builder.finish());
         let qty_array: ArrayRef = Arc::new(qty_builder.finish());
+        let fee_array: ArrayRef = Arc::new(fee_builder.finish());
+        let is_taker_array: ArrayRef = Arc::new(is_taker_builder.finish());
 
         let d = PyDict::new_bound(py);
         d.set_item("ts_exchange", ts_array.to_data().to_pyarrow(py)?)?;
@@ -204,6 +214,8 @@ impl BacktestResult {
         d.set_item("side", side_array.to_data().to_pyarrow(py)?)?;
         d.set_item("price", price_array.to_data().to_pyarrow(py)?)?;
         d.set_item("qty", qty_array.to_data().to_pyarrow(py)?)?;
+        d.set_item("fee", fee_array.to_data().to_pyarrow(py)?)?;
+        d.set_item("is_taker", is_taker_array.to_data().to_pyarrow(py)?)?;
         d.set_item("_len", n)?;
         Ok(d)
     }
@@ -234,7 +246,7 @@ impl BacktestResult {
 #[pymethods]
 impl Backtester {
     #[new]
-    #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=0, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all"))]
+    #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=0, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all", maker_fee_bps=0, taker_fee_bps=0))]
     pub fn new(
         data: Py<PyAny>,
         feed_latency_ns: i64,
@@ -243,6 +255,8 @@ impl Backtester {
         batch_ms: i64,
         seed: u64,
         trade_log_mode: &str,
+        maker_fee_bps: i64,
+        taker_fee_bps: i64,
     ) -> Self {
         Backtester {
             data,
@@ -252,6 +266,8 @@ impl Backtester {
             batch_ms,
             seed,
             trade_log_mode: trade_log_mode.to_string(),
+            maker_fee_bps,
+            taker_fee_bps,
         }
     }
 
@@ -290,6 +306,8 @@ impl Backtester {
                 s if s.starts_with("ringbuffer") => TradeLogMode::RingBuffer(10000),
                 _ => TradeLogMode::All,
             },
+            maker_fee_bps: self.maker_fee_bps,
+            taker_fee_bps: self.taker_fee_bps,
         };
 
         let strat = PyStrategy { obj: strategy };
@@ -368,6 +386,8 @@ impl Backtester {
         // 2. Prepare configurations for each run.
         let n = strategies.len();
 
+        let maker_fee_bps = self.maker_fee_bps;
+        let taker_fee_bps = self.taker_fee_bps;
         let configs: Vec<EngineConfig> = (0..n)
             .map(|i| {
                 EngineConfig {
@@ -388,6 +408,8 @@ impl Backtester {
                         s if s.starts_with("ringbuffer") => TradeLogMode::RingBuffer(10000),
                         _ => TradeLogMode::All,
                     },
+                    maker_fee_bps,
+                    taker_fee_bps,
                 }
             })
             .collect();
@@ -464,6 +486,8 @@ impl Backtester {
                 s if s.starts_with("ringbuffer") => TradeLogMode::RingBuffer(10000),
                 _ => TradeLogMode::All,
             },
+            maker_fee_bps: self.maker_fee_bps,
+            taker_fee_bps: self.taker_fee_bps,
         };
 
         let strat = PyStrategy { obj: strategy };
@@ -904,6 +928,8 @@ fn trade_fill_to_pydict<'py>(py: Python<'py>, t: &TradeFill) -> PyResult<Bound<'
     d.set_item("side", t.side.as_i8())?;
     d.set_item("price", t.price)?;
     d.set_item("qty", t.qty)?;
+    d.set_item("fee", t.fee)?;
+    d.set_item("is_taker", t.is_taker)?;
     Ok(d)
 }
 
