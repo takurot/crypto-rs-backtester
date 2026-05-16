@@ -101,7 +101,7 @@ def test_e2e_symbol_map_fallback_alphabetical() -> None:
 
 def test_e2e_symbol_map_missing_symbol_raises() -> None:
     """symbol_map that omits a data key must raise ValueError."""
-    with pytest.raises((ValueError, Exception)):
+    with pytest.raises(ValueError, match="missing entry"):
         rust_backtester.Backtester(
             data={"sym_a": make_ticks(2), "sym_b": make_ticks(2)},
             seed=42,
@@ -111,11 +111,21 @@ def test_e2e_symbol_map_missing_symbol_raises() -> None:
 
 def test_e2e_symbol_map_id_zero_raises() -> None:
     """symbol_id=0 must raise ValueError."""
-    with pytest.raises((ValueError, Exception)):
+    with pytest.raises(ValueError, match="ids must be >= 1"):
         rust_backtester.Backtester(
             data={"sym": make_ticks(2)},
             seed=42,
             symbol_map={"sym": 0},
+        )
+
+
+def test_e2e_symbol_map_duplicate_ids_raise() -> None:
+    """symbol_map ids must be unique across data keys."""
+    with pytest.raises(ValueError, match="duplicate id"):
+        rust_backtester.Backtester(
+            data={"sym_a": make_ticks(2), "sym_b": make_ticks(2)},
+            seed=42,
+            symbol_map={"sym_a": 7, "sym_b": 7},
         )
 
 

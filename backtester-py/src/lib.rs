@@ -287,6 +287,7 @@ impl Backtester {
                     .map_err(|_| pyo3::exceptions::PyTypeError::new_err("data must be a dict"))?;
 
                 let mut map: HashMap<String, u32> = HashMap::new();
+                let mut ids_to_keys: HashMap<u32, String> = HashMap::new();
                 for (k, v) in dict.iter() {
                     let key: String = k.extract()?;
                     let id: u32 = v.extract().map_err(|_| {
@@ -299,6 +300,12 @@ impl Backtester {
                         return Err(pyo3::exceptions::PyValueError::new_err(format!(
                             "symbol_map: id for '{}' is 0; ids must be >= 1",
                             key
+                        )));
+                    }
+                    if let Some(existing_key) = ids_to_keys.insert(id, key.clone()) {
+                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                            "symbol_map: duplicate id {} for '{}' and '{}'",
+                            id, existing_key, key
                         )));
                     }
                     map.insert(key, id);
@@ -1045,10 +1052,17 @@ fn build_symbol_ids(
     match explicit_map {
         Some(map) => {
             // Validate all keys are covered (already checked in new(), but guard here too).
+            let mut ids_to_keys: HashMap<u32, String> = HashMap::new();
             for k in sorted_keys {
-                if !map.contains_key(k) {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                let id = map.get(k).copied().ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
                         "symbol_map is missing entry for data key '{k}'"
+                    ))
+                })?;
+                if let Some(existing_key) = ids_to_keys.insert(id, k.clone()) {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "symbol_map: duplicate id {} for '{}' and '{}'",
+                        id, existing_key, k
                     )));
                 }
             }
