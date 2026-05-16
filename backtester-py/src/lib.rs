@@ -1,6 +1,6 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 mod arrow_utils;
 
@@ -152,6 +152,8 @@ pub struct Backtester {
     taker_fee_bps: i64,
     /// Number of fills retained when `trade_log_mode="ringbuffer"`.
     ring_buffer_size: usize,
+    /// Explicit symbol→id mapping. When `None`, alphabetical order is used.
+    symbol_map: Option<HashMap<String, u32>>,
 }
 
 #[pyclass]
@@ -248,8 +250,9 @@ impl BacktestResult {
 #[pymethods]
 impl Backtester {
     #[new]
-    #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=0, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all", maker_fee_bps=0, taker_fee_bps=0, ring_buffer_size=10000))]
+    #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=0, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all", maker_fee_bps=0, taker_fee_bps=0, ring_buffer_size=10000, symbol_map=None))]
     pub fn new(
+        py: Python<'_>,
         data: Py<PyAny>,
         feed_latency_ns: i64,
         order_update_latency_ns: i64,
@@ -260,12 +263,62 @@ impl Backtester {
         maker_fee_bps: i64,
         taker_fee_bps: i64,
         ring_buffer_size: usize,
+        symbol_map: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         if ring_buffer_size == 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "ring_buffer_size must be >= 1",
             ));
         }
+
+        // Parse and validate symbol_map if provided.
+        let resolved_symbol_map = match symbol_map {
+            None => None,
+            Some(ref py_map) => {
+                let bound = py_map.bind(py);
+                let dict = bound.downcast::<PyDict>().map_err(|_| {
+                    pyo3::exceptions::PyTypeError::new_err("symbol_map must be a dict")
+                })?;
+
+                // Extract data keys to check coverage.
+                let data_bound = data.bind(py);
+                let data_dict = data_bound
+                    .downcast::<PyDict>()
+                    .map_err(|_| pyo3::exceptions::PyTypeError::new_err("data must be a dict"))?;
+
+                let mut map: HashMap<String, u32> = HashMap::new();
+                for (k, v) in dict.iter() {
+                    let key: String = k.extract()?;
+                    let id: u32 = v.extract().map_err(|_| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "symbol_map: id for '{}' must be a non-negative integer",
+                            key
+                        ))
+                    })?;
+                    if id == 0 {
+                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                            "symbol_map: id for '{}' is 0; ids must be >= 1",
+                            key
+                        )));
+                    }
+                    map.insert(key, id);
+                }
+
+                // Ensure every data key is covered.
+                for (k, _) in data_dict.iter() {
+                    let key: String = k.extract()?;
+                    if !map.contains_key(&key) {
+                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                            "symbol_map is missing entry for data key '{}'",
+                            key
+                        )));
+                    }
+                }
+
+                Some(map)
+            }
+        };
+
         Ok(Backtester {
             data,
             feed_latency_ns,
@@ -277,6 +330,7 @@ impl Backtester {
             maker_fee_bps,
             taker_fee_bps,
             ring_buffer_size,
+            symbol_map: resolved_symbol_map,
         })
     }
 
@@ -337,10 +391,7 @@ impl Backtester {
         }
         keys.sort();
 
-        let mut symbol_ids: BTreeMap<String, u32> = BTreeMap::new();
-        for (i, k) in keys.iter().enumerate() {
-            symbol_ids.insert(k.clone(), (i as u32) + 1);
-        }
+        let symbol_ids = build_symbol_ids(&keys, self.symbol_map.as_ref())?;
 
         for k in keys {
             let symbol_id = symbol_ids.get(&k).copied().ok_or_else(|| {
@@ -390,7 +441,12 @@ impl Backtester {
         strategies: Vec<Py<PyAny>>,
     ) -> PyResult<Vec<BacktestResult>> {
         // 1. Pre-load data to avoid GIL during parallel execution setup.
-        let events = parse_polars_data(py, &self.data, self.feed_latency_ns)?;
+        let events = parse_polars_data(
+            py,
+            &self.data,
+            self.feed_latency_ns,
+            self.symbol_map.as_ref(),
+        )?;
 
         // 2. Prepare configurations for each run.
         let n = strategies.len();
@@ -978,11 +1034,42 @@ fn order_report_to_pyobject(py: Python<'_>, r: &OrderReport) -> PyResult<Py<PyAn
     Ok(Py::new(py, rep)?.into_any())
 }
 
+/// Build a symbol-key → symbol-id map from sorted keys.
+///
+/// If `explicit_map` is provided, uses those ids; otherwise assigns 1-based ids
+/// in alphabetical order (keys must already be sorted).
+fn build_symbol_ids(
+    sorted_keys: &[String],
+    explicit_map: Option<&HashMap<String, u32>>,
+) -> PyResult<HashMap<String, u32>> {
+    match explicit_map {
+        Some(map) => {
+            // Validate all keys are covered (already checked in new(), but guard here too).
+            for k in sorted_keys {
+                if !map.contains_key(k) {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "symbol_map is missing entry for data key '{k}'"
+                    )));
+                }
+            }
+            Ok(map.clone())
+        }
+        None => {
+            let mut ids = HashMap::with_capacity(sorted_keys.len());
+            for (i, k) in sorted_keys.iter().enumerate() {
+                ids.insert(k.clone(), (i as u32) + 1);
+            }
+            Ok(ids)
+        }
+    }
+}
+
 // Helper to parse data once.
 fn parse_polars_data(
     py: Python<'_>,
     data: &Py<PyAny>,
     feed_latency_ns: i64,
+    explicit_symbol_map: Option<&HashMap<String, u32>>,
 ) -> PyResult<Vec<(i64, EventKind)>> {
     let data_any = data.bind(py);
     let data_dict = data_any.downcast::<PyDict>()?;
@@ -994,11 +1081,7 @@ fn parse_polars_data(
     }
     keys.sort();
 
-    // Deterministic mapping: symbol string -> u32 id.
-    let mut symbol_ids: BTreeMap<String, u32> = BTreeMap::new();
-    for (i, k) in keys.iter().enumerate() {
-        symbol_ids.insert(k.clone(), (i as u32) + 1);
-    }
+    let symbol_ids = build_symbol_ids(&keys, explicit_symbol_map)?;
 
     let mut events = Vec::new();
 
