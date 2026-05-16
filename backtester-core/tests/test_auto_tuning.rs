@@ -1,14 +1,21 @@
 use backtester_core::engine::{Context, Engine, EngineConfig, EngineMode, Strategy};
 use backtester_core::latency_model::ConstantLatency;
 use backtester_core::queue_model::ConservativeQueue;
-use backtester_core::tick_source::TickSource;
+use backtester_core::tick_source::{TickSource, TickSourceError};
 use backtester_core::types::{OrderReport, Tick};
 
 #[derive(Default)]
 struct FastStrategy;
 impl Strategy for FastStrategy {
-    fn on_tick(&mut self, _: &Tick, _: &mut Context<'_>) {}
-    fn on_order_update(&mut self, _: &OrderReport, _: &mut Context<'_>) {}
+    type Error = std::convert::Infallible;
+
+    fn on_tick(&mut self, _: &Tick, _: &mut Context<'_>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn on_order_update(&mut self, _: &OrderReport, _: &mut Context<'_>) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 struct VecTickSource {
@@ -33,15 +40,15 @@ impl VecTickSource {
     }
 }
 impl TickSource for VecTickSource {
-    fn peek(&mut self) -> Option<&Tick> {
-        self.ticks.get(self.idx)
+    fn peek(&mut self) -> Result<Option<&Tick>, TickSourceError> {
+        Ok(self.ticks.get(self.idx))
     }
-    fn next(&mut self) -> Option<Tick> {
+    fn next(&mut self) -> Result<Option<Tick>, TickSourceError> {
         let t = self.ticks.get(self.idx).cloned();
         if t.is_some() {
             self.idx += 1;
         }
-        t
+        Ok(t)
     }
     fn symbol_id(&self) -> u32 {
         1
@@ -90,7 +97,7 @@ fn test_engine_increases_batch_size_when_fast() {
     // So after first batch (update), config.max_batch_ns will snap to 100_000?
     // Yes, Tuner starts at min.
 
-    engine.run();
+    engine.run().expect("engine run");
 
     let final_batch = engine.config().max_batch_ns;
     println!(
@@ -117,11 +124,17 @@ use std::time::Duration;
 /// A strategy that simulates slow processing to trigger batch size decrease.
 struct SlowStrategy;
 impl Strategy for SlowStrategy {
-    fn on_tick(&mut self, _: &Tick, _: &mut Context<'_>) {
+    type Error = std::convert::Infallible;
+
+    fn on_tick(&mut self, _: &Tick, _: &mut Context<'_>) -> Result<(), Self::Error> {
         // Simulate 10µs processing time (well above 500ns target)
         thread::sleep(Duration::from_micros(10));
+        Ok(())
     }
-    fn on_order_update(&mut self, _: &OrderReport, _: &mut Context<'_>) {}
+
+    fn on_order_update(&mut self, _: &OrderReport, _: &mut Context<'_>) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -154,7 +167,7 @@ fn test_engine_decreases_batch_size_when_slow() {
 
     let initial_batch = engine.config().max_batch_ns;
 
-    engine.run();
+    engine.run().expect("engine run");
 
     let final_batch = engine.config().max_batch_ns;
     println!(

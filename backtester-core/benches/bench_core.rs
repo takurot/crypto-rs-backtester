@@ -9,7 +9,7 @@ use backtester_core::stats::{
     sharpe_ratio_from_pnl_series_simd, sortino_ratio_from_pnl_series,
     sortino_ratio_from_pnl_series_parallel, sortino_ratio_from_pnl_series_simd,
 };
-use backtester_core::tick_source::TickSource;
+use backtester_core::tick_source::{TickSource, TickSourceError};
 use backtester_core::types::{Order, OrderType, Tick};
 use backtester_core::{EventKind, EventQueue, OrderBookL2, Side, TradeLogMode, fixtures};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
@@ -137,15 +137,15 @@ impl GenTickSource {
 }
 
 impl TickSource for GenTickSource {
-    fn next(&mut self) -> Option<Tick> {
+    fn next(&mut self) -> Result<Option<Tick>, TickSourceError> {
         let current = self.next_tick;
         self.i += 1;
         self.next_tick = self.compute_next(self.i);
-        current
+        Ok(current)
     }
 
-    fn peek(&mut self) -> Option<&Tick> {
-        self.next_tick.as_ref()
+    fn peek(&mut self) -> Result<Option<&Tick>, TickSourceError> {
+        Ok(self.next_tick.as_ref())
     }
 
     fn symbol_id(&self) -> u32 {
@@ -169,7 +169,9 @@ impl LoadStrategy {
 }
 
 impl Strategy for LoadStrategy {
-    fn on_tick(&mut self, tick: &Tick, ctx: &mut Context<'_>) {
+    type Error = std::convert::Infallible;
+
+    fn on_tick(&mut self, tick: &Tick, ctx: &mut Context<'_>) -> Result<(), Self::Error> {
         let n = self
             .delivered_counts
             .entry(tick.symbol_id)
@@ -194,14 +196,16 @@ impl Strategy for LoadStrategy {
                 qty: tick.qty, // 1 lot
             });
         }
+        Ok(())
     }
 
     fn on_order_update(
         &mut self,
         _report: &backtester_core::types::OrderReport,
         _ctx: &mut Context<'_>,
-    ) {
+    ) -> Result<(), Self::Error> {
         // No-op: this strategy only loads submission path.
+        Ok(())
     }
 }
 
@@ -272,7 +276,7 @@ fn bench_engine_e2e_multisymbol_tick(c: &mut Criterion) {
                 )));
             }
 
-            eng.run();
+            eng.run().expect("engine run");
             black_box(eng.stats().total_trades)
         })
     });
@@ -315,7 +319,7 @@ fn bench_engine_e2e_multisymbol_batch(c: &mut Criterion) {
                 )));
             }
 
-            eng.run();
+            eng.run().expect("engine run");
             black_box(eng.stats().total_trades)
         })
     });

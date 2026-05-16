@@ -13,6 +13,7 @@ This document outlines the detailed implementation tasks for the Rust-based Tick
 - Phases 0–4: completed and covered by tests/benches.
 - Phase 5.1: Arrow C Stream zero-copy ingestion implemented (`backtester-py/src/arrow_utils.rs`, `run_arrow`), E2E smoke test present.
 - Phase 5.2: Streaming `TickSource` + lazy scheduling implemented (`backtester-core/src/tick_source.rs`, engine `sources` with deterministic tie-breakers).
+- Issue #30: Arrow ingestion, engine execution, and Python strategy callback failures now propagate as `Result`/Python exceptions instead of panicking across the FFI boundary.
 - Phase 5.3–5.6: not started.
 
 ## Test Naming & Layout Conventions (Applies to tasks below)

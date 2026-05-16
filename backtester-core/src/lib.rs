@@ -16,7 +16,7 @@ pub mod types;
 pub mod utils;
 
 pub use account::{Account, Position};
-pub use engine::{Context, Engine, EngineConfig, EngineMode, MarketView, Strategy};
+pub use engine::{Context, Engine, EngineConfig, EngineError, EngineMode, MarketView, Strategy};
 pub use event::{Event, EventId, EventKind};
 pub use event_queue::EventQueue;
 pub use latency_model::{ConstantLatency, LatencyModel, LogNormalJitter};
@@ -26,7 +26,7 @@ pub use stats::{
     BacktestStats, IncrementalStats, TradeFill, TradeLog, TradeLogMode, calculate_stats,
 };
 pub use sweep::{SweepResult, run_parameter_sweep};
-pub use tick_source::{ArrowTickSource, TickSource};
+pub use tick_source::{ArrowTickSource, TickSource, TickSourceError};
 pub use types::{
     FixedPoint, FundingEvent, L2Update, Order, OrderReport, OrderState, OrderType, Side, Tick,
     TsExchangeNs, TsLocalNs, TsSimNs,

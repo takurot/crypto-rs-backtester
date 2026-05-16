@@ -9,14 +9,14 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::pyarrow::ToPyArrow;
 use arrow::record_batch::RecordBatch;
 use arrow_utils::get_arrow_stream;
-use backtester_core::engine::{EngineConfig, EngineMode, Strategy as CoreStrategy};
+use backtester_core::engine::{EngineConfig, EngineError, EngineMode, Strategy as CoreStrategy};
 use backtester_core::latency_model::ConstantLatency;
 use backtester_core::queue_model::ConservativeQueue;
 use backtester_core::stats::{equity_curve_from_pnl_deltas, full_pnl_history};
 use backtester_core::tick_source::ArrowTickSource; // Import TickSource types
 use backtester_core::types::{Order, OrderReport, OrderType, Side, Tick};
 use backtester_core::{BacktestStats, TradeFill, TradeLogMode};
-use backtester_core::{Context as CoreContext, Engine, EventKind};
+use backtester_core::{Context as CoreContext, Engine, EventKind, TickSourceError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule};
 use rayon::prelude::*;
@@ -316,7 +316,9 @@ impl Backtester {
         }
 
         for k in keys {
-            let symbol_id = *symbol_ids.get(&k).unwrap();
+            let symbol_id = symbol_ids.get(&k).copied().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("missing symbol id")
+            })?;
             let lf_any = data_dict
                 .get_item(&k)?
                 .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("missing key"))?;
@@ -326,11 +328,12 @@ impl Backtester {
             let table = df.call_method0("to_arrow")?;
             let stream = get_arrow_stream(&table)?;
 
-            let source = ArrowTickSource::new(symbol_id, stream);
+            let source =
+                ArrowTickSource::try_new(symbol_id, stream).map_err(tick_source_error_to_pyerr)?;
             engine.add_tick_source(Box::new(source));
         }
 
-        engine.run();
+        engine.run().map_err(engine_error_to_pyerr)?;
 
         let trades = engine.trade_log().fills_vec();
         let stats = engine.stats();
@@ -392,7 +395,7 @@ impl Backtester {
         let latency_ns = self.feed_latency_ns;
 
         // 3. Parallel execution releasing GIL.
-        let results: Result<Vec<BacktestResult>, String> = py.allow_threads(move || {
+        let results: PyResult<Vec<BacktestResult>> = py.allow_threads(move || {
             strategies
                 .into_par_iter()
                 .zip(configs.into_par_iter())
@@ -411,7 +414,7 @@ impl Backtester {
                         engine.push_event(*ts, kind.clone());
                     }
 
-                    engine.run();
+                    engine.run().map_err(engine_error_to_pyerr)?;
 
                     let trades = engine.trade_log().fills_vec();
                     let stats = engine.stats();
@@ -431,7 +434,7 @@ impl Backtester {
                 .collect()
         });
 
-        results.map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+        results
     }
 
     /// Run backtest using an Arrow RecordBatch stream (zero-copy ingestion).
@@ -480,10 +483,11 @@ impl Backtester {
         // Note: We currently do NOT use AsyncBatchIter here because calling PyArrow-backed
         // streams from a background thread can be unsafe (GIL/refcounting) depending on the
         // underlying implementation.
-        let source = ArrowTickSource::new(1, arrow_stream);
+        let source =
+            ArrowTickSource::try_new(1, arrow_stream).map_err(tick_source_error_to_pyerr)?;
         engine.add_tick_source(Box::new(source));
 
-        engine.run();
+        engine.run().map_err(engine_error_to_pyerr)?;
 
         let trades = engine.trade_log().fills_vec();
         let stats = engine.stats();
@@ -513,6 +517,28 @@ pub fn call_strategy_on_ticks(
         strategy.call_method1("on_ticks", (&ticks,))?;
     }
     Ok(())
+}
+
+fn engine_error_to_pyerr(error: EngineError<PyErr>) -> PyErr {
+    match error {
+        EngineError::TickSource(error) => tick_source_error_to_pyerr(error),
+        EngineError::Strategy(error) => error,
+        EngineError::Internal(message) => {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(message)
+        }
+    }
+}
+
+fn tick_source_error_to_pyerr(error: TickSourceError) -> PyErr {
+    match error {
+        TickSourceError::NonIntegerColumn { .. } => {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(error.to_string())
+        }
+        TickSourceError::Reader(_) => {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(error.to_string())
+        }
+        _ => PyErr::new::<pyo3::exceptions::PyValueError, _>(error.to_string()),
+    }
 }
 
 fn checksum_from_polars_data(py: Python<'_>, data: &Py<PyAny>) -> PyResult<i64> {
@@ -641,7 +667,13 @@ impl PyContext {
 }
 
 impl CoreStrategy for PyStrategy {
-    fn on_tick(&mut self, tick: &Tick, _ctx: &mut backtester_core::Context<'_>) {
+    type Error = PyErr;
+
+    fn on_tick(
+        &mut self,
+        tick: &Tick,
+        _ctx: &mut backtester_core::Context<'_>,
+    ) -> Result<(), Self::Error> {
         Python::with_gil(|py| {
             let tick_obj = tick_to_pyobject(py, tick)?;
             let strategy = self.obj.bind(py);
@@ -667,10 +699,13 @@ impl CoreStrategy for PyStrategy {
             apply_py_ctx_commands(py, py_ctx, _ctx)?;
             Ok::<(), PyErr>(())
         })
-        .expect("python on_tick failed");
     }
 
-    fn on_order_update(&mut self, report: &OrderReport, _ctx: &mut backtester_core::Context<'_>) {
+    fn on_order_update(
+        &mut self,
+        report: &OrderReport,
+        _ctx: &mut backtester_core::Context<'_>,
+    ) -> Result<(), Self::Error> {
         Python::with_gil(|py| {
             let report_obj = order_report_to_pyobject(py, report)?;
             let strategy = self.obj.bind(py);
@@ -694,10 +729,9 @@ impl CoreStrategy for PyStrategy {
             apply_py_ctx_commands(py, py_ctx, _ctx)?;
             Ok::<(), PyErr>(())
         })
-        .expect("python on_order_update failed");
     }
 
-    fn on_ticks(&mut self, ticks: &[Tick], ctx: &mut CoreContext<'_>) {
+    fn on_ticks(&mut self, ticks: &[Tick], ctx: &mut CoreContext<'_>) -> Result<(), Self::Error> {
         Python::with_gil(|py| {
             let strategy = self.obj.bind(py);
             let py_ctx = Py::new(
@@ -773,10 +807,13 @@ impl CoreStrategy for PyStrategy {
             apply_py_ctx_commands(py, py_ctx, ctx)?;
             Ok::<(), PyErr>(())
         })
-        .expect("python on_ticks failed");
     }
 
-    fn on_order_updates(&mut self, reports: &[OrderReport], ctx: &mut CoreContext<'_>) {
+    fn on_order_updates(
+        &mut self,
+        reports: &[OrderReport],
+        ctx: &mut CoreContext<'_>,
+    ) -> Result<(), Self::Error> {
         Python::with_gil(|py| {
             let strategy = self.obj.bind(py);
             let py_ctx = Py::new(
@@ -808,7 +845,6 @@ impl CoreStrategy for PyStrategy {
             apply_py_ctx_commands(py, py_ctx, ctx)?;
             Ok::<(), PyErr>(())
         })
-        .expect("python on_order_updates failed");
     }
 }
 
@@ -1006,7 +1042,9 @@ fn parse_polars_data(
             }
         }
 
-        let symbol_id = *symbol_ids.get(&k).expect("symbol_id");
+        let symbol_id = symbol_ids.get(&k).copied().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("missing symbol id")
+        })?;
         for i in 0..n {
             let ts_ex: i64 = ts_exchange.get_item(i)?.extract()?;
             let ts_local: i64 = match ts_local_list.as_ref() {

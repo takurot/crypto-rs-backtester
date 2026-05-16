@@ -15,12 +15,18 @@ struct RecordingStrategy {
 }
 
 impl Strategy for RecordingStrategy {
-    fn on_tick(&mut self, tick: &Tick, ctx: &mut backtester_core::Context<'_>) {
+    type Error = std::convert::Infallible;
+
+    fn on_tick(
+        &mut self,
+        tick: &Tick,
+        ctx: &mut backtester_core::Context<'_>,
+    ) -> Result<(), Self::Error> {
         self.seen_symbol_ids.push(tick.symbol_id);
 
         // For the L2-isolation test: submit exactly one order on the first tick.
         if self.submitted {
-            return;
+            return Ok(());
         }
         self.submitted = true;
         ctx.submit_order(Order {
@@ -33,10 +39,16 @@ impl Strategy for RecordingStrategy {
             price: 100_00000000,
             qty: 1_00000000,
         });
+        Ok(())
     }
 
-    fn on_order_update(&mut self, report: &OrderReport, _ctx: &mut backtester_core::Context<'_>) {
+    fn on_order_update(
+        &mut self,
+        report: &OrderReport,
+        _ctx: &mut backtester_core::Context<'_>,
+    ) -> Result<(), Self::Error> {
         self.reports.push(*report);
+        Ok(())
     }
 }
 
@@ -83,7 +95,7 @@ fn test_multi_venue_event_ordering_by_ts_sim() {
     eng.push_event(1_000, EventKind::TickDelivery(tick_b));
     eng.push_event(1_000, EventKind::TickDelivery(tick_a));
 
-    eng.run();
+    eng.run().expect("engine run");
     assert_eq!(eng.strategy().seen_symbol_ids, vec![SYMBOL_B, SYMBOL_A]);
 }
 
@@ -98,7 +110,13 @@ fn test_arbitrage_two_venues_smoke() {
     }
 
     impl Strategy for ArbStrategy {
-        fn on_tick(&mut self, tick: &Tick, ctx: &mut backtester_core::Context<'_>) {
+        type Error = std::convert::Infallible;
+
+        fn on_tick(
+            &mut self,
+            tick: &Tick,
+            ctx: &mut backtester_core::Context<'_>,
+        ) -> Result<(), Self::Error> {
             match tick.symbol_id {
                 SYMBOL_A => self.last_a = Some(tick.price),
                 SYMBOL_B => self.last_b = Some(tick.price),
@@ -106,10 +124,10 @@ fn test_arbitrage_two_venues_smoke() {
             }
 
             if self.submitted {
-                return;
+                return Ok(());
             }
             let (Some(pa), Some(pb)) = (self.last_a, self.last_b) else {
-                return;
+                return Ok(());
             };
 
             // Buy cheap on A, sell rich on B.
@@ -136,14 +154,16 @@ fn test_arbitrage_two_venues_smoke() {
                     qty: 1_00000000,
                 });
             }
+            Ok(())
         }
 
         fn on_order_update(
             &mut self,
             report: &OrderReport,
             _ctx: &mut backtester_core::Context<'_>,
-        ) {
+        ) -> Result<(), Self::Error> {
             self.reports.push(*report);
+            Ok(())
         }
     }
 
@@ -217,7 +237,7 @@ fn test_arbitrage_two_venues_smoke() {
     eng.push_event(2_000, EventKind::Tick(fill_a));
     eng.push_event(2_000, EventKind::Tick(fill_b));
 
-    eng.run();
+    eng.run().expect("engine run");
 
     // Positions should reflect the filled legs.
     assert_eq!(eng.account().position_qty(SYMBOL_A), 1_00000000);
@@ -289,7 +309,7 @@ fn test_multi_venue_l2_updates_do_not_leak_between_symbols() {
     };
     eng.push_event(2_000, EventKind::Tick(fill_a));
 
-    eng.run();
+    eng.run().expect("engine run");
 
     assert_eq!(eng.account().position_qty(SYMBOL_A), 1_00000000);
     assert_eq!(eng.strategy().reports.len(), 1);

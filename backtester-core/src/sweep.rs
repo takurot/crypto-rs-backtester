@@ -1,6 +1,6 @@
 use rayon::prelude::*;
 
-use crate::engine::{Engine, EngineConfig, Strategy};
+use crate::engine::{Engine, EngineConfig, EngineError, Strategy};
 use crate::event::EventKind;
 use crate::latency_model::LatencyModel;
 use crate::queue_model::QueueModel;
@@ -22,10 +22,11 @@ pub fn run_parameter_sweep<Q, S, L>(
     base_config: EngineConfig,
     strategies: Vec<S>,
     events: &[(TsSimNs, EventKind)],
-) -> Vec<SweepResult>
+) -> Result<Vec<SweepResult>, EngineError<S::Error>>
 where
     Q: QueueModel + Clone + Send + Sync,
     S: Strategy + Send,
+    S::Error: Send,
     L: LatencyModel + Clone + Send + Sync,
 {
     let base_seed = base_config.seed;
@@ -44,11 +45,11 @@ where
                 engine.push_event(ts, kind);
             }
 
-            engine.run();
+            engine.run()?;
 
-            SweepResult {
+            Ok(SweepResult {
                 stats: engine.stats(),
-            }
+            })
         })
         .collect()
 }

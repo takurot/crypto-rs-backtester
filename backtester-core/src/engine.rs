@@ -1,11 +1,12 @@
 use rustc_hash::FxHashMap;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::fmt;
 use std::time::Instant;
 
 use crate::account::Account;
 use crate::event::{Event, EventId, EventKind};
-use crate::tick_source::TickSource;
+use crate::tick_source::{TickSource, TickSourceError};
 
 use crate::event_queue::EventQueue;
 use crate::exchange_simulator::ExchangeSimulator;
@@ -58,6 +59,29 @@ impl Default for EngineConfig {
     }
 }
 
+#[derive(Debug)]
+pub enum EngineError<StrategyError> {
+    TickSource(TickSourceError),
+    Strategy(StrategyError),
+    Internal(String),
+}
+
+impl<StrategyError: fmt::Display> fmt::Display for EngineError<StrategyError> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TickSource(error) => write!(f, "{error}"),
+            Self::Strategy(error) => write!(f, "{error}"),
+            Self::Internal(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl<StrategyError> From<TickSourceError> for EngineError<StrategyError> {
+    fn from(value: TickSourceError) -> Self {
+        Self::TickSource(value)
+    }
+}
+
 /// Feed-delayed market state visible to strategies.
 #[derive(Debug, Default, Clone)]
 pub struct MarketView {
@@ -76,23 +100,41 @@ impl MarketView {
 
 /// Strategy interface (Rust-native; Python will be adapted via a wrapper in `backtester-py`).
 pub trait Strategy {
-    fn on_tick(&mut self, tick: &Tick, ctx: &mut Context<'_>);
+    type Error: fmt::Display;
 
-    fn on_ticks(&mut self, ticks: &[Tick], ctx: &mut Context<'_>) {
+    fn on_tick(&mut self, tick: &Tick, ctx: &mut Context<'_>) -> Result<(), Self::Error>;
+
+    fn on_ticks(&mut self, ticks: &[Tick], ctx: &mut Context<'_>) -> Result<(), Self::Error> {
         for t in ticks {
-            self.on_tick(t, ctx);
+            self.on_tick(t, ctx)?;
         }
+        Ok(())
     }
 
-    fn on_order_update(&mut self, report: &OrderReport, ctx: &mut Context<'_>);
+    fn on_order_update(
+        &mut self,
+        report: &OrderReport,
+        ctx: &mut Context<'_>,
+    ) -> Result<(), Self::Error>;
 
-    fn on_order_updates(&mut self, reports: &[OrderReport], ctx: &mut Context<'_>) {
+    fn on_order_updates(
+        &mut self,
+        reports: &[OrderReport],
+        ctx: &mut Context<'_>,
+    ) -> Result<(), Self::Error> {
         for r in reports {
-            self.on_order_update(r, ctx);
+            self.on_order_update(r, ctx)?;
         }
+        Ok(())
     }
 
-    fn on_funding(&mut self, _event: &FundingEvent, _ctx: &mut Context<'_>) {}
+    fn on_funding(
+        &mut self,
+        _event: &FundingEvent,
+        _ctx: &mut Context<'_>,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,30 +329,31 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
         self.queue.push(Event { id, kind });
     }
 
-    pub fn run(&mut self) {
+    pub fn run(&mut self) -> Result<(), EngineError<S::Error>> {
         loop {
-            while self.step().is_some() {}
+            while self.step()?.is_some() {}
 
             // Final flush for batch mode: if we have buffered deliveries, wake the strategy once.
             if self.config.mode == EngineMode::Batch
                 && (!self.tick_buffer.is_empty() || !self.report_buffer.is_empty())
             {
-                self.flush_strategy(self.now_ts_sim);
+                self.flush_strategy(self.now_ts_sim)?;
                 // flushing may schedule new events (orders), so keep running until stable
                 continue;
             }
             break;
         }
+        Ok(())
     }
 
     #[inline(always)]
-    pub fn step(&mut self) -> Option<Event> {
+    pub fn step(&mut self) -> Result<Option<Event>, EngineError<S::Error>> {
         // 1. Ingest from sources if they have events earlier than (or equal to) the queue head.
         loop {
             if unlikely(!self.is_source_heap_initialized) {
                 self.source_heap.clear();
                 for (i, source) in self.sources.iter_mut().enumerate() {
-                    if let Some(tick) = source.peek() {
+                    if let Some(tick) = source.peek()? {
                         self.source_heap.push(PeekedEvent {
                             ts: tick.ts_exchange,
                             source_idx: i,
@@ -331,7 +374,9 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 self.source_heap.pop(); // Remove from heap (we will consume it)
 
                 // Consume from source
-                let tick = self.sources[idx].next().unwrap(); // Must exist if it was in heap
+                let tick = self.sources[idx].next()?.ok_or_else(|| {
+                    EngineError::Internal(format!("source {idx} was queued but had no next tick"))
+                })?;
 
                 // Schedule Tick event (truth)
                 self.push_event(tick.ts_exchange, EventKind::Tick(tick));
@@ -351,7 +396,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 self.push_event(delivery_ts, EventKind::TickDelivery(delivered_tick));
 
                 // Push next tick from this source to heap
-                if let Some(next) = self.sources[idx].peek() {
+                if let Some(next) = self.sources[idx].peek()? {
                     self.source_heap.push(PeekedEvent {
                         ts: next.ts_exchange,
                         source_idx: idx,
@@ -362,11 +407,15 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             }
 
             // If we are here, either sources are empty or queue head is earlier than any source.
-            self.queue.peek()?;
+            if self.queue.peek().is_none() {
+                return Ok(None);
+            }
             break;
         }
 
-        let event = self.queue.pop()?;
+        let Some(event) = self.queue.pop() else {
+            return Ok(None);
+        };
         self.now_ts_sim = event.ts_sim();
 
         let mut wakeup_requested = false;
@@ -432,7 +481,9 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 match self.config.mode {
                     EngineMode::Tick => {
                         let mut ctx = Context::new(tick.ts_local, &self.market);
-                        self.strategy.on_tick(&tick, &mut ctx);
+                        self.strategy
+                            .on_tick(&tick, &mut ctx)
+                            .map_err(EngineError::Strategy)?;
                         self.handle_commands(ctx.into_commands(), tick.ts_local);
                     }
                     EngineMode::Batch => {
@@ -470,7 +521,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             EventKind::OrderCancel { order_id } => {
                 let Some(&symbol_id) = self.order_symbol_by_id.get(&order_id) else {
                     // Unknown order_id: ignore.
-                    return Some(event);
+                    return Ok(Some(event));
                 };
                 if self.exchange_mut(symbol_id).cancel_order(order_id).is_ok() {
                     let dt = self
@@ -500,7 +551,9 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 match self.config.mode {
                     EngineMode::Tick => {
                         let mut ctx = Context::new(self.now_ts_sim, &self.market);
-                        self.strategy.on_order_update(&report, &mut ctx);
+                        self.strategy
+                            .on_order_update(&report, &mut ctx)
+                            .map_err(EngineError::Strategy)?;
                         self.handle_commands(ctx.into_commands(), self.now_ts_sim);
                     }
                     EngineMode::Batch => {
@@ -524,13 +577,17 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 match self.config.mode {
                     EngineMode::Tick => {
                         let mut ctx = Context::new(self.now_ts_sim, &self.market);
-                        self.strategy.on_funding(&event, &mut ctx);
+                        self.strategy
+                            .on_funding(&event, &mut ctx)
+                            .map_err(EngineError::Strategy)?;
                         self.handle_commands(ctx.into_commands(), self.now_ts_sim);
                     }
                     EngineMode::Batch => {
                         // Funding is treated as a wakeup condition in Phase 2.
                         let mut ctx = Context::new(self.now_ts_sim, &self.market);
-                        self.strategy.on_funding(&event, &mut ctx);
+                        self.strategy
+                            .on_funding(&event, &mut ctx)
+                            .map_err(EngineError::Strategy)?;
                         self.handle_commands(ctx.into_commands(), self.now_ts_sim);
                         wakeup_requested = true;
                     }
@@ -550,7 +607,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
         if self.config.mode == EngineMode::Batch && (wakeup_requested || self.pending_wakeup) {
             let next_ts = self.queue.peek().map(|e| e.ts_sim());
             if next_ts != Some(self.now_ts_sim) {
-                self.flush_strategy(self.now_ts_sim);
+                self.flush_strategy(self.now_ts_sim)?;
                 self.pending_wakeup = false;
             } else {
                 // Cannot flush yet because events with same timestamp exist.
@@ -559,7 +616,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             }
         }
 
-        Some(event)
+        Ok(Some(event))
     }
 
     fn handle_commands(&mut self, commands: Vec<Command>, ts_local: TsLocalNs) {
@@ -583,9 +640,9 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
         }
     }
 
-    fn flush_strategy(&mut self, ts_local: TsLocalNs) {
+    fn flush_strategy(&mut self, ts_local: TsLocalNs) -> Result<(), EngineError<S::Error>> {
         if self.tick_buffer.is_empty() && self.report_buffer.is_empty() {
-            return;
+            return Ok(());
         }
 
         // Any early flush invalidates the pending time-based wakeup timer.
@@ -601,13 +658,16 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
         let mut ctx = Context::new(ts_local, &self.market);
 
         if !self.tick_buffer.is_empty() {
-            self.strategy.on_ticks(&self.tick_buffer, &mut ctx);
+            self.strategy
+                .on_ticks(&self.tick_buffer, &mut ctx)
+                .map_err(EngineError::Strategy)?;
             self.tick_buffer.clear();
         }
 
         if !self.report_buffer.is_empty() {
             self.strategy
-                .on_order_updates(&self.report_buffer, &mut ctx);
+                .on_order_updates(&self.report_buffer, &mut ctx)
+                .map_err(EngineError::Strategy)?;
             self.report_buffer.clear();
         }
 
@@ -620,6 +680,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 .record_batch(duration.as_nanos() as i64, total_items);
             self.config.max_batch_ns = self.tuner.current_batch_ns();
         }
+        Ok(())
     }
 }
 
@@ -639,9 +700,11 @@ mod tests {
     }
 
     impl Strategy for RecordingStrategy {
-        fn on_tick(&mut self, tick: &Tick, ctx: &mut Context<'_>) {
+        type Error = std::convert::Infallible;
+
+        fn on_tick(&mut self, tick: &Tick, ctx: &mut Context<'_>) -> Result<(), Self::Error> {
             if self.submitted {
-                return;
+                return Ok(());
             }
             self.submitted = true;
             ctx.submit_order(Order {
@@ -654,10 +717,16 @@ mod tests {
                 price: tick.price,
                 qty: tick.qty,
             });
+            Ok(())
         }
 
-        fn on_order_update(&mut self, report: &OrderReport, _ctx: &mut Context<'_>) {
+        fn on_order_update(
+            &mut self,
+            report: &OrderReport,
+            _ctx: &mut Context<'_>,
+        ) -> Result<(), Self::Error> {
             self.reports.push(*report);
+            Ok(())
         }
     }
 
@@ -665,8 +734,19 @@ mod tests {
     struct NoopStrategy;
 
     impl Strategy for NoopStrategy {
-        fn on_tick(&mut self, _tick: &Tick, _ctx: &mut Context<'_>) {}
-        fn on_order_update(&mut self, _report: &OrderReport, _ctx: &mut Context<'_>) {}
+        type Error = std::convert::Infallible;
+
+        fn on_tick(&mut self, _tick: &Tick, _ctx: &mut Context<'_>) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn on_order_update(
+            &mut self,
+            _report: &OrderReport,
+            _ctx: &mut Context<'_>,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -716,7 +796,7 @@ mod tests {
         eng.push_event(3_000, EventKind::Tick(t1_truth));
         eng.push_event(4_000, EventKind::TickDelivery(t1_delivery));
 
-        eng.run();
+        eng.run().expect("engine run");
 
         let reports = &eng.strategy.reports;
         assert_eq!(reports.len(), 1);
@@ -753,14 +833,14 @@ mod tests {
         eng.push_event(2_000, EventKind::TickDelivery(t0_delivery));
 
         // Process truth tick first: MarketView must not update.
-        eng.step().expect("truth tick");
+        eng.step().expect("engine step").expect("truth tick");
         assert_eq!(
             eng.market_view().last_trade(fixtures::SYMBOL_ID_BTC_USDT),
             None
         );
 
         // Process delivery: MarketView updates exactly at ts_local.
-        eng.step().expect("delivery tick");
+        eng.step().expect("engine step").expect("delivery tick");
         let last = eng
             .market_view()
             .last_trade(fixtures::SYMBOL_ID_BTC_USDT)
@@ -818,7 +898,7 @@ mod tests {
         eng.push_event(3_000, EventKind::Funding(f));
 
         // Before funding event is processed, funding PnL must be 0.
-        while let Some(ev) = eng.step() {
+        while let Some(ev) = eng.step().expect("engine step") {
             if ev.ts_sim() < 3_000 {
                 assert_eq!(eng.account().total_funding_pnl(), 0);
                 continue;
@@ -857,8 +937,10 @@ mod tests {
         // 1. Submit order
         let t0 = fixtures::tick_trade(1_000, 1_000, 0);
         eng.push_event(1_000, EventKind::TickDelivery(t0));
-        eng.step().expect("tick delivery");
-        eng.step().expect("order arrival at exchange");
+        eng.step().expect("engine step").expect("tick delivery");
+        eng.step()
+            .expect("engine step")
+            .expect("order arrival at exchange");
 
         assert_eq!(eng.order_symbol_by_id.len(), 1);
         let order_id = 1;
@@ -871,7 +953,7 @@ mod tests {
         );
 
         // 2. ACK order
-        eng.step().expect("ack");
+        eng.step().expect("engine step").expect("ack");
 
         // 3. Fill order
         let t1 = Tick {
@@ -885,13 +967,13 @@ mod tests {
             flags: 0x01,
         };
         eng.push_event(2_000, EventKind::Tick(t1));
-        eng.step().expect("tick truth");
+        eng.step().expect("engine step").expect("tick truth");
 
         // At this point OrderReport(Filled) is scheduled but not processed.
         assert_eq!(eng.order_symbol_by_id.len(), 1);
 
         // 4. Process OrderReport
-        eng.step().expect("report");
+        eng.step().expect("engine step").expect("report");
 
         // Cleanup should have happened.
         assert_eq!(eng.order_symbol_by_id.len(), 0);
@@ -924,14 +1006,14 @@ mod tests {
     }
 
     impl TickSource for VecTickSource {
-        fn next(&mut self) -> Option<Tick> {
+        fn next(&mut self) -> Result<Option<Tick>, TickSourceError> {
             let current = self.next_tick;
             self.next_tick = self.ticks.next();
-            current
+            Ok(current)
         }
 
-        fn peek(&mut self) -> Option<&Tick> {
-            self.next_tick.as_ref()
+        fn peek(&mut self) -> Result<Option<&Tick>, TickSourceError> {
+            Ok(self.next_tick.as_ref())
         }
 
         fn symbol_id(&self) -> u32 {
@@ -979,7 +1061,7 @@ mod tests {
                 eng.push_event(delivery.ts_local, EventKind::TickDelivery(delivery));
             }
 
-            eng.run();
+            eng.run().expect("engine run");
             eng.stats()
         };
 
@@ -1006,7 +1088,7 @@ mod tests {
             let source = VecTickSource::new(fixtures::SYMBOL_ID_BTC_USDT, stream_ticks);
             eng.add_tick_source(Box::new(source));
 
-            eng.run();
+            eng.run().expect("engine run");
             eng.stats()
         };
 
