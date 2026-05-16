@@ -1,9 +1,7 @@
 use crate::types::{Side, Tick};
 use crate::utils::prefetch_read_data;
-use arrow::array::{
-    Array, Int8Array, Int8Builder, Int16Array, Int32Array, Int64Array, Int64Builder, UInt8Array,
-    UInt16Array, UInt32Array, UInt64Array, UInt64Builder,
-};
+use arrow::array::{Array, Int8Array, Int64Array, UInt64Array};
+use arrow::compute::cast;
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 
@@ -82,166 +80,64 @@ fn get_optional_u64(batch: &RecordBatch, name: &str) -> Option<UInt64Array> {
 }
 
 fn integer_array_to_i64(column: &dyn Array, name: &str) -> Int64Array {
-    if column.null_count() > 0 {
-        panic!("{name} column contains nulls");
-    }
-
-    match column.data_type() {
-        DataType::Int8 => {
-            let arr = column.as_any().downcast_ref::<Int8Array>().unwrap();
-            let mut builder = Int64Builder::with_capacity(arr.len());
-            for i in 0..arr.len() {
-                builder.append_value(i64::from(arr.value(i)));
-            }
-            builder.finish()
-        }
-        DataType::Int16 => {
-            let arr = column.as_any().downcast_ref::<Int16Array>().unwrap();
-            let mut builder = Int64Builder::with_capacity(arr.len());
-            for i in 0..arr.len() {
-                builder.append_value(i64::from(arr.value(i)));
-            }
-            builder.finish()
-        }
-        DataType::Int32 => {
-            let arr = column.as_any().downcast_ref::<Int32Array>().unwrap();
-            let mut builder = Int64Builder::with_capacity(arr.len());
-            for i in 0..arr.len() {
-                builder.append_value(i64::from(arr.value(i)));
-            }
-            builder.finish()
-        }
-        DataType::Int64 => column
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .expect("not Int64")
-            .clone(),
-        DataType::UInt8 => {
-            let arr = column.as_any().downcast_ref::<UInt8Array>().unwrap();
-            let mut builder = Int64Builder::with_capacity(arr.len());
-            for i in 0..arr.len() {
-                builder.append_value(i64::from(arr.value(i)));
-            }
-            builder.finish()
-        }
-        DataType::UInt16 => {
-            let arr = column.as_any().downcast_ref::<UInt16Array>().unwrap();
-            let mut builder = Int64Builder::with_capacity(arr.len());
-            for i in 0..arr.len() {
-                builder.append_value(i64::from(arr.value(i)));
-            }
-            builder.finish()
-        }
-        DataType::UInt32 => {
-            let arr = column.as_any().downcast_ref::<UInt32Array>().unwrap();
-            let mut builder = Int64Builder::with_capacity(arr.len());
-            for i in 0..arr.len() {
-                builder.append_value(i64::from(arr.value(i)));
-            }
-            builder.finish()
-        }
-        DataType::UInt64 => {
-            let arr = column.as_any().downcast_ref::<UInt64Array>().unwrap();
-            let mut builder = Int64Builder::with_capacity(arr.len());
-            for i in 0..arr.len() {
-                let value = i64::try_from(arr.value(i))
-                    .unwrap_or_else(|_| panic!("{name} value out of i64 range"));
-                builder.append_value(value);
-            }
-            builder.finish()
-        }
-        other => panic!("{name} is not an integer column (got {other:?})"),
-    }
+    cast_integer_array(column, name, &DataType::Int64)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("cast returned wrong type")
+        .clone()
 }
 
 fn integer_array_to_u64(column: &dyn Array, name: &str) -> UInt64Array {
+    cast_integer_array(column, name, &DataType::UInt64)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .expect("cast returned wrong type")
+        .clone()
+}
+
+fn integer_array_to_i8(column: &dyn Array, name: &str) -> Int8Array {
+    cast_integer_array(column, name, &DataType::Int8)
+        .as_any()
+        .downcast_ref::<Int8Array>()
+        .expect("cast returned wrong type")
+        .clone()
+}
+
+fn cast_integer_array(
+    column: &dyn Array,
+    name: &str,
+    target_type: &DataType,
+) -> arrow::array::ArrayRef {
+    if !is_integer_type(column.data_type()) {
+        panic!(
+            "{name} is not an integer column (got {:?})",
+            column.data_type()
+        );
+    }
     if column.null_count() > 0 {
         panic!("{name} column contains nulls");
     }
 
-    match column.data_type() {
-        DataType::Int8 => {
-            let arr = column.as_any().downcast_ref::<Int8Array>().unwrap();
-            let mut builder = UInt64Builder::with_capacity(arr.len());
-            for i in 0..arr.len() {
-                let value = u64::try_from(arr.value(i))
-                    .unwrap_or_else(|_| panic!("{name} value out of u64 range"));
-                builder.append_value(value);
-            }
-            builder.finish()
-        }
-        DataType::Int16 => {
-            let arr = column.as_any().downcast_ref::<Int16Array>().unwrap();
-            let mut builder = UInt64Builder::with_capacity(arr.len());
-            for i in 0..arr.len() {
-                let value = u64::try_from(arr.value(i))
-                    .unwrap_or_else(|_| panic!("{name} value out of u64 range"));
-                builder.append_value(value);
-            }
-            builder.finish()
-        }
-        DataType::Int32 => {
-            let arr = column.as_any().downcast_ref::<Int32Array>().unwrap();
-            let mut builder = UInt64Builder::with_capacity(arr.len());
-            for i in 0..arr.len() {
-                let value = u64::try_from(arr.value(i))
-                    .unwrap_or_else(|_| panic!("{name} value out of u64 range"));
-                builder.append_value(value);
-            }
-            builder.finish()
-        }
-        DataType::Int64 => {
-            let arr = column.as_any().downcast_ref::<Int64Array>().unwrap();
-            let mut builder = UInt64Builder::with_capacity(arr.len());
-            for i in 0..arr.len() {
-                let value = u64::try_from(arr.value(i))
-                    .unwrap_or_else(|_| panic!("{name} value out of u64 range"));
-                builder.append_value(value);
-            }
-            builder.finish()
-        }
-        DataType::UInt8 => {
-            let arr = column.as_any().downcast_ref::<UInt8Array>().unwrap();
-            let mut builder = UInt64Builder::with_capacity(arr.len());
-            for i in 0..arr.len() {
-                builder.append_value(u64::from(arr.value(i)));
-            }
-            builder.finish()
-        }
-        DataType::UInt16 => {
-            let arr = column.as_any().downcast_ref::<UInt16Array>().unwrap();
-            let mut builder = UInt64Builder::with_capacity(arr.len());
-            for i in 0..arr.len() {
-                builder.append_value(u64::from(arr.value(i)));
-            }
-            builder.finish()
-        }
-        DataType::UInt32 => {
-            let arr = column.as_any().downcast_ref::<UInt32Array>().unwrap();
-            let mut builder = UInt64Builder::with_capacity(arr.len());
-            for i in 0..arr.len() {
-                builder.append_value(u64::from(arr.value(i)));
-            }
-            builder.finish()
-        }
-        DataType::UInt64 => column
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .expect("not UInt64")
-            .clone(),
-        other => panic!("{name} is not an integer column (got {other:?})"),
+    let casted = cast(column, target_type)
+        .unwrap_or_else(|e| panic!("{name} cannot be cast to {target_type:?}: {e}"));
+    if casted.null_count() > 0 {
+        panic!("{name} contains values out of {target_type:?} range");
     }
+    casted
 }
 
-fn integer_array_to_i8(column: &dyn Array, name: &str) -> Int8Array {
-    let values = integer_array_to_i64(column, name);
-    let mut builder = Int8Builder::with_capacity(values.len());
-    for i in 0..values.len() {
-        let value = i8::try_from(values.value(i))
-            .unwrap_or_else(|_| panic!("{name} value out of i8 range"));
-        builder.append_value(value);
-    }
-    builder.finish()
+fn is_integer_type(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+    )
 }
 
 use arrow::error::ArrowError;

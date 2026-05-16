@@ -32,7 +32,8 @@ def test_e2e_arrow_stream_accepts_non_int64_integer_columns() -> None:
 
     table = df.to_arrow()
     reader = pa.RecordBatchReader.from_batches(table.schema, table.to_batches())
-    bt = Backtester(data={"ignored": df.lazy()}, seed=42)
+    # run_arrow consumes the explicit Arrow stream; data is unused but required by the API.
+    bt = Backtester(data={}, seed=42)
     strategy = _Recorder()
 
     bt.run_arrow(reader, strategy)
