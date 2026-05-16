@@ -43,6 +43,12 @@ pub struct EngineConfig {
     pub seed: u64,
     /// Trade log retention mode (Phase 5.4).
     pub trade_log_mode: TradeLogMode,
+    /// Maker fee in basis points (1 bps = 0.01%). Applied to passive fills via QueueModel.
+    /// E.g., `2` = 0.02% maker fee. Fixed-point safe: fee = notional * bps / 10_000.
+    pub maker_fee_bps: i64,
+    /// Taker fee in basis points (1 bps = 0.01%). Reserved for aggressive/market-order fills.
+    /// Currently not applied (market orders not yet implemented); stored for forward compatibility.
+    pub taker_fee_bps: i64,
 }
 
 impl Default for EngineConfig {
@@ -55,6 +61,8 @@ impl Default for EngineConfig {
             auto_tune: false,
             seed: 0,
             trade_log_mode: TradeLogMode::All,
+            maker_fee_bps: 0,
+            taker_fee_bps: 0,
         }
     }
 }
@@ -80,6 +88,23 @@ impl<StrategyError> From<TickSourceError> for EngineError<StrategyError> {
     fn from(value: TickSourceError) -> Self {
         Self::TickSource(value)
     }
+}
+
+/// Compute fee for a fill in fixed-point (quote, scaled by 1e8).
+///
+/// `fee = (price * qty / SCALE) * fee_bps / 10_000`
+///
+/// Both `price` and `qty` are fixed-point i64 (scaled by 1e8).
+/// The result is also fixed-point i64 (scaled by 1e8), always >= 0.
+#[inline]
+fn compute_fee(price: i64, qty: i64, fee_bps: i64) -> i64 {
+    if fee_bps == 0 {
+        return 0;
+    }
+    use crate::types::FixedPoint;
+    let notional = (price as i128 * qty.abs() as i128) / FixedPoint::SCALE as i128;
+    let fee = notional * fee_bps as i128 / 10_000;
+    fee.clamp(0, i64::MAX as i128) as i64
 }
 
 /// Feed-delayed market state visible to strategies.
@@ -432,6 +457,9 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 fills.clear();
                 trade_fills.clear();
 
+                // Cache config values before mutable borrow of exchanges.
+                let maker_fee_bps = self.config.maker_fee_bps;
+
                 // Market truth drives the exchange simulator only.
                 {
                     // Scope the mutable borrow of `self.exchanges` to avoid borrow conflicts.
@@ -443,6 +471,9 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                             && let Some(order) = ex.get_order(r.order_id)
                         {
                             fills.push((order, r.last_fill_qty, r.last_fill_price));
+                            // All QueueModel fills are passive (maker) by convention.
+                            let fee =
+                                compute_fee(r.last_fill_price, r.last_fill_qty, maker_fee_bps);
                             trade_fills.push(TradeFill {
                                 ts_exchange: tick.ts_exchange,
                                 symbol_id: r.symbol_id,
@@ -450,6 +481,8 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                                 side: order.side,
                                 price: r.last_fill_price,
                                 qty: r.last_fill_qty,
+                                fee,
+                                is_taker: false,
                             });
                         }
                     }
@@ -459,9 +492,12 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                     self.trade_log.push_fill(f);
                 }
 
-                for (order, fill_qty, fill_price) in fills.iter() {
+                // `fills` and `trade_fills` are built in lock-step; zip to share fee per fill.
+                for ((order, fill_qty, fill_price), tf) in fills.iter().zip(trade_fills.iter()) {
                     let pnl_delta = self.account.on_fill(order, *fill_qty, *fill_price);
-                    self.trade_log.push_pnl_delta(tick.ts_exchange, pnl_delta);
+                    // Subtract fee from PnL so net PnL reflects all trading costs.
+                    let net_pnl = pnl_delta.saturating_sub(tf.fee);
+                    self.trade_log.push_pnl_delta(tick.ts_exchange, net_pnl);
                 }
 
                 let ts_delivery = tick.ts_exchange + self.config.order_update_latency_ns;
@@ -1101,5 +1137,102 @@ mod tests {
             stats_mat.total_pnl, stats_stream.total_pnl,
             "Total PnL mismatch"
         );
+    }
+
+    /// Helper that runs a 2-tick backtest (open buy at t0, fill at t1) and returns stats.
+    fn run_two_tick_backtest(maker_fee_bps: i64) -> BacktestStats {
+        use crate::stats::calculate_stats;
+        let config = EngineConfig {
+            feed_latency_ns: 0,
+            order_update_latency_ns: 0,
+            mode: EngineMode::Tick,
+            maker_fee_bps,
+            ..Default::default()
+        };
+        let strategy = RecordingStrategy::default();
+        let latency_model = ConstantLatency {
+            feed_latency_ns: 0,
+            order_latency_ns: 0,
+        };
+        let mut eng = Engine::new(ConservativeQueue, strategy, config, latency_model);
+
+        // t0: truth + immediate delivery at ts=1_000; strategy submits a buy limit order
+        let t0 = Tick {
+            ts_exchange: 1_000,
+            ts_local: 1_000,
+            seq: 0,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            price: 100_00000000,
+            qty: 1_00000000,
+            side: Side::Buy,
+            flags: 0x01,
+        };
+        eng.push_event(1_000, EventKind::Tick(t0));
+        eng.push_event(1_000, EventKind::TickDelivery(t0));
+
+        // t1: sell trade triggers fill of the previously submitted buy order
+        let t1 = Tick {
+            ts_exchange: 2_000,
+            ts_local: 2_000,
+            seq: 1,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            price: 100_00000000,
+            qty: 1_00000000,
+            side: Side::Sell,
+            flags: 0x01,
+        };
+        eng.push_event(2_000, EventKind::Tick(t1));
+        eng.push_event(2_000, EventKind::TickDelivery(t1));
+
+        eng.run();
+        calculate_stats(eng.trade_log())
+    }
+
+    #[test]
+    fn test_zero_fees_pnl_unchanged() {
+        // With zero fees the fill that opens a position has pnl_delta=0 → total_pnl=0.
+        let stats = run_two_tick_backtest(0);
+        assert_eq!(stats.total_fees_paid, 0);
+        // Position opened (buy) but not closed; realized PnL is still 0.
+        assert_eq!(stats.total_pnl, 0);
+    }
+
+    #[test]
+    fn test_maker_fee_deducted_from_pnl() {
+        // 2 bps maker fee on a $100 * 1 BTC fill.
+        // fee = 100_00000000 * 1_00000000 / 1e8 * 2 / 10_000 = 2_000_000 (fixed-point 0.02 USD)
+        let stats = run_two_tick_backtest(2);
+        assert_eq!(stats.total_fees_paid, 2_000_000, "fee should be 2_000_000");
+        // Opening fill → gross PnL delta = 0; net PnL = 0 - fee = -2_000_000
+        assert_eq!(
+            stats.total_pnl, -2_000_000,
+            "net pnl should reflect fee cost"
+        );
+    }
+
+    #[test]
+    fn test_total_fees_paid_accumulates_across_fills() {
+        // With 2 fills each paying 2_000_000 fee, total_fees_paid should be 4_000_000.
+        use crate::stats::{TradeFill, TradeLog, calculate_stats};
+        use crate::types::Side;
+        let mut log = TradeLog::default();
+        let fill = TradeFill {
+            ts_exchange: 1_000,
+            order_id: 1,
+            price: 100_00000000,
+            qty: 1_00000000,
+            fee: 2_000_000,
+            symbol_id: 1,
+            side: Side::Buy,
+            is_taker: false,
+        };
+        log.push_fill(fill);
+        log.push_fill(TradeFill {
+            order_id: 2,
+            side: Side::Sell,
+            ..fill
+        });
+        let stats = calculate_stats(&log);
+        assert_eq!(stats.total_fees_paid, 4_000_000);
     }
 }

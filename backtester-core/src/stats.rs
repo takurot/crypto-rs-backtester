@@ -14,9 +14,14 @@ pub struct TradeFill {
     pub order_id: u64,
     pub price: i64,
     pub qty: i64,
+    /// Fee charged at fill time (quote, fixed-point scaled by 1e8, always >= 0).
+    pub fee: i64,
     pub symbol_id: u32,
     /// Side of the *strategy's* order which got filled.
     pub side: Side,
+    /// Whether this fill was a taker (aggressive) execution.
+    /// `false` = maker (passive, via QueueModel); `true` = taker (market/aggressive order).
+    pub is_taker: bool,
 }
 
 /// Arbitrary PnL event (e.g. funding payment).
@@ -49,6 +54,8 @@ pub struct IncrementalStats {
     pub gross_profit: i64,
     pub gross_loss: i64,
     pub win_count: u64,
+    /// Cumulative fees paid across all fills (quote, fixed-point scaled by 1e8).
+    pub total_fees_paid: i64,
     total_holding_period: i64,
     closed_trades: u64,
     pnl_count: u64,
@@ -66,6 +73,7 @@ pub struct IncrementalStats {
 impl IncrementalStats {
     fn on_fill(&mut self, fill: &TradeFill) {
         self.total_trades += 1;
+        self.total_fees_paid = self.total_fees_paid.saturating_add(fill.fee);
 
         let qty = fill.qty;
         if qty <= 0 {
@@ -855,7 +863,7 @@ pub fn calculate_stats(trade_log: &TradeLog) -> BacktestStats {
         total_pnl: inc.total_pnl,
         avg_trade_pnl,
         avg_holding_period: inc.avg_holding_period(),
-        total_fees_paid: 0,
+        total_fees_paid: inc.total_fees_paid,
     }
 }
 
@@ -969,6 +977,8 @@ mod tests {
                 side: Side::Buy,
                 price: 100_00000000,
                 qty: 1_00000000,
+                fee: 0,
+                is_taker: false,
             },
             TradeFill {
                 ts_exchange: 2_000,
@@ -977,6 +987,8 @@ mod tests {
                 side: Side::Sell,
                 price: 101_00000000,
                 qty: 1_00000000,
+                fee: 0,
+                is_taker: false,
             },
         ];
         let mut log = TradeLog::default();
@@ -1055,6 +1067,8 @@ mod tests {
             side: Side::Buy,
             price: 100_00000000,
             qty: 1_00000000,
+            fee: 0,
+            is_taker: false,
         });
         log.push_fill(TradeFill {
             ts_exchange: 11,
@@ -1063,6 +1077,8 @@ mod tests {
             side: Side::Sell,
             price: 110_00000000,
             qty: 1_00000000,
+            fee: 0,
+            is_taker: false,
         });
         log.push_pnl_delta(11, 10_00000000);
         log.push_pnl_event(PnlEvent {
@@ -1086,6 +1102,8 @@ mod tests {
             side: Side::Buy,
             price: 100_00000000,
             qty: 1_00000000,
+            fee: 0,
+            is_taker: false,
         });
         log.push_fill(TradeFill {
             ts_exchange: 11,
@@ -1094,6 +1112,8 @@ mod tests {
             side: Side::Sell,
             price: 110_00000000,
             qty: 1_00000000,
+            fee: 0,
+            is_taker: false,
         });
         log.push_pnl_delta(11, 10_00000000);
 
@@ -1104,6 +1124,8 @@ mod tests {
             side: Side::Buy,
             price: 100_00000000,
             qty: 1_00000000,
+            fee: 0,
+            is_taker: false,
         });
         log.push_fill(TradeFill {
             ts_exchange: 21,
@@ -1112,6 +1134,8 @@ mod tests {
             side: Side::Sell,
             price: 95_00000000,
             qty: 1_00000000,
+            fee: 0,
+            is_taker: false,
         });
         log.push_pnl_delta(21, -5_00000000);
 
@@ -1133,6 +1157,8 @@ mod tests {
                 side: Side::Buy,
                 price: 100_00000000,
                 qty: 1_00000000,
+                fee: 0,
+                is_taker: false,
             });
         }
         assert_eq!(log.len(), cap);
@@ -1151,6 +1177,8 @@ mod tests {
                 side: Side::Buy,
                 price: 100_00000000,
                 qty: 1_00000000,
+                fee: 0,
+                is_taker: false,
             },
             TradeFill {
                 ts_exchange: 2_000,
@@ -1159,6 +1187,8 @@ mod tests {
                 side: Side::Sell,
                 price: 110_00000000, // +10 PnL
                 qty: 1_00000000,
+                fee: 0,
+                is_taker: false,
             },
             TradeFill {
                 ts_exchange: 3_000,
@@ -1167,6 +1197,8 @@ mod tests {
                 side: Side::Buy,
                 price: 100_00000000,
                 qty: 1_00000000,
+                fee: 0,
+                is_taker: false,
             },
             TradeFill {
                 ts_exchange: 4_000,
@@ -1175,6 +1207,8 @@ mod tests {
                 side: Side::Sell,
                 price: 95_00000000, // -5 PnL
                 qty: 1_00000000,
+                fee: 0,
+                is_taker: false,
             },
         ];
 
@@ -1213,6 +1247,8 @@ mod tests {
                 side: Side::Buy,
                 price: 100_00000000,
                 qty: 1_00000000,
+                fee: 0,
+                is_taker: false,
             },
             TradeFill {
                 ts_exchange: 2_000,
@@ -1221,6 +1257,8 @@ mod tests {
                 side: Side::Sell,
                 price: 110_00000000, // +10 PnL
                 qty: 1_00000000,
+                fee: 0,
+                is_taker: false,
             },
             TradeFill {
                 ts_exchange: 3_000,
@@ -1229,6 +1267,8 @@ mod tests {
                 side: Side::Buy,
                 price: 100_00000000,
                 qty: 1_00000000,
+                fee: 0,
+                is_taker: false,
             },
             TradeFill {
                 ts_exchange: 4_000,
@@ -1237,6 +1277,8 @@ mod tests {
                 side: Side::Sell,
                 price: 95_00000000, // -5 PnL
                 qty: 1_00000000,
+                fee: 0,
+                is_taker: false,
             },
         ];
 
@@ -1281,6 +1323,8 @@ mod tests {
                 side: Side::Buy,
                 price: 100_00000000,
                 qty: 2_00000000,
+                fee: 0,
+                is_taker: false,
             },
             TradeFill {
                 ts_exchange: 2_000,
@@ -1289,6 +1333,8 @@ mod tests {
                 side: Side::Sell,
                 price: 110_00000000,
                 qty: 1_00000000,
+                fee: 0,
+                is_taker: false,
             },
             TradeFill {
                 ts_exchange: 3_000,
@@ -1297,6 +1343,8 @@ mod tests {
                 side: Side::Buy,
                 price: 105_00000000,
                 qty: 1_00000000,
+                fee: 0,
+                is_taker: false,
             },
             TradeFill {
                 ts_exchange: 4_000,
@@ -1305,6 +1353,8 @@ mod tests {
                 side: Side::Sell,
                 price: 95_00000000,
                 qty: 3_00000000,
+                fee: 0,
+                is_taker: false,
             },
             TradeFill {
                 ts_exchange: 5_000,
@@ -1313,6 +1363,8 @@ mod tests {
                 side: Side::Buy,
                 price: 90_00000000,
                 qty: 1_00000000,
+                fee: 0,
+                is_taker: false,
             },
         ];
 

@@ -256,6 +256,7 @@ fn bench_engine_e2e_multisymbol_tick(c: &mut Criterion) {
                 auto_tune: false,
                 seed: 42,
                 trade_log_mode: TradeLogMode::All,
+                ..Default::default()
             };
             let latency_model = ConstantLatency {
                 feed_latency_ns: cfg.feed_latency_ns,
@@ -300,6 +301,7 @@ fn bench_engine_e2e_multisymbol_batch(c: &mut Criterion) {
                 auto_tune: false,
                 seed: 42,
                 trade_log_mode: TradeLogMode::All,
+                ..Default::default()
             };
             let latency_model = ConstantLatency {
                 feed_latency_ns: cfg.feed_latency_ns,
