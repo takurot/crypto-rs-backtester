@@ -150,6 +150,8 @@ pub struct Backtester {
     trade_log_mode: String,
     maker_fee_bps: i64,
     taker_fee_bps: i64,
+    /// Number of fills retained when `trade_log_mode="ringbuffer"`.
+    ring_buffer_size: usize,
 }
 
 #[pyclass]
@@ -246,7 +248,7 @@ impl BacktestResult {
 #[pymethods]
 impl Backtester {
     #[new]
-    #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=0, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all", maker_fee_bps=0, taker_fee_bps=0))]
+    #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=0, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all", maker_fee_bps=0, taker_fee_bps=0, ring_buffer_size=10000))]
     pub fn new(
         data: Py<PyAny>,
         feed_latency_ns: i64,
@@ -257,6 +259,7 @@ impl Backtester {
         trade_log_mode: &str,
         maker_fee_bps: i64,
         taker_fee_bps: i64,
+        ring_buffer_size: usize,
     ) -> Self {
         Backtester {
             data,
@@ -268,6 +271,7 @@ impl Backtester {
             trade_log_mode: trade_log_mode.to_string(),
             maker_fee_bps,
             taker_fee_bps,
+            ring_buffer_size,
         }
     }
 
@@ -303,7 +307,7 @@ impl Backtester {
                 "all" => TradeLogMode::All,
                 "summaryonly" => TradeLogMode::SummaryOnly,
                 "none" => TradeLogMode::None,
-                s if s.starts_with("ringbuffer") => TradeLogMode::RingBuffer(10000),
+                s if s.starts_with("ringbuffer") => TradeLogMode::RingBuffer(self.ring_buffer_size),
                 _ => TradeLogMode::All,
             },
             maker_fee_bps: self.maker_fee_bps,
@@ -405,7 +409,9 @@ impl Backtester {
                         "all" => TradeLogMode::All,
                         "summaryonly" => TradeLogMode::SummaryOnly,
                         "none" => TradeLogMode::None,
-                        s if s.starts_with("ringbuffer") => TradeLogMode::RingBuffer(10000),
+                        s if s.starts_with("ringbuffer") => {
+                            TradeLogMode::RingBuffer(self.ring_buffer_size)
+                        }
                         _ => TradeLogMode::All,
                     },
                     maker_fee_bps,
@@ -483,7 +489,7 @@ impl Backtester {
                 "all" => TradeLogMode::All,
                 "summaryonly" => TradeLogMode::SummaryOnly,
                 "none" => TradeLogMode::None,
-                s if s.starts_with("ringbuffer") => TradeLogMode::RingBuffer(10000),
+                s if s.starts_with("ringbuffer") => TradeLogMode::RingBuffer(self.ring_buffer_size),
                 _ => TradeLogMode::All,
             },
             maker_fee_bps: self.maker_fee_bps,
