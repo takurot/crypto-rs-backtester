@@ -1190,7 +1190,7 @@ mod tests {
         eng.push_event(2_000, EventKind::Tick(t1));
         eng.push_event(2_000, EventKind::TickDelivery(t1));
 
-        eng.run();
+        eng.run().unwrap();
         calculate_stats(eng.trade_log())
     }
 
@@ -1294,7 +1294,7 @@ mod tests {
         eng.push_event(2_000, EventKind::Tick(t1));
         eng.push_event(2_000, EventKind::TickDelivery(t1));
 
-        eng.run();
+        eng.run().unwrap();
 
         // Position is now open (long 1 BTC at 100). Submit a sell order to close it.
         // We drive a second engine run via injected events for the sell order.
