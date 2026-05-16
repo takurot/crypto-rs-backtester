@@ -21,9 +21,11 @@ impl PriceStrategy {
 }
 
 impl Strategy for PriceStrategy {
-    fn on_tick(&mut self, tick: &Tick, ctx: &mut Context<'_>) {
+    type Error = std::convert::Infallible;
+
+    fn on_tick(&mut self, tick: &Tick, ctx: &mut Context<'_>) -> Result<(), Self::Error> {
         if self.submitted {
-            return;
+            return Ok(());
         }
         self.submitted = true;
         ctx.submit_order(Order {
@@ -36,9 +38,16 @@ impl Strategy for PriceStrategy {
             price: self.price,
             qty: 1_00000000,
         });
+        Ok(())
     }
 
-    fn on_order_update(&mut self, _report: &OrderReport, _ctx: &mut Context<'_>) {}
+    fn on_order_update(
+        &mut self,
+        _report: &OrderReport,
+        _ctx: &mut Context<'_>,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -117,7 +126,8 @@ fn test_parameter_sweep_parallel_ordered() {
         PriceStrategy::new(101_00000000),
     ];
 
-    let results = run_parameter_sweep(ConservativeQueue, latency, base_config, strategies, &events);
+    let results = run_parameter_sweep(ConservativeQueue, latency, base_config, strategies, &events)
+        .expect("parameter sweep");
 
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].stats.total_trades, 1);
