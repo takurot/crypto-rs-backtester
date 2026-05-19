@@ -552,7 +552,7 @@ impl Backtester {
     ) -> PyResult<BacktestResult> {
         let config = EngineConfig {
             feed_latency_ns: self.feed_latency_ns,
-            order_update_latency_ns: self.feed_latency_ns,
+            order_update_latency_ns: self.order_update_latency_ns,
             mode: match self.python_mode.as_str() {
                 "batch" => EngineMode::Batch,
                 _ => EngineMode::Tick,
@@ -606,9 +606,18 @@ impl Backtester {
                 let stream_any = streams_dict
                     .get_item(k)?
                     .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(k.clone()))?;
-                let arrow_stream = get_arrow_stream(&stream_any)?;
-                let source = ArrowTickSource::try_new(symbol_id, arrow_stream)
-                    .map_err(tick_source_error_to_pyerr)?;
+                let arrow_stream = get_arrow_stream(&stream_any).map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "run_arrow: stream for symbol '{}': {}",
+                        k, e
+                    ))
+                })?;
+                let source = ArrowTickSource::try_new(symbol_id, arrow_stream).map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "run_arrow: stream for symbol '{}': {}",
+                        k, e
+                    ))
+                })?;
                 engine.add_tick_source(Box::new(source));
             }
         } else {

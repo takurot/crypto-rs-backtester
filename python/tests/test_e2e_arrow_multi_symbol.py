@@ -92,5 +92,35 @@ def test_e2e_run_arrow_dict_symbol_map_override() -> None:
 def test_e2e_run_arrow_empty_dict_raises() -> None:
     """Empty dict raises ValueError — no streams to process."""
     bt = Backtester(data={}, seed=42)
-    with pytest.raises((ValueError, RuntimeError)):
+    with pytest.raises(ValueError, match="stream dict must not be empty"):
         bt.run_arrow({}, TickCollector())
+
+
+def test_e2e_run_arrow_dict_symbol_map_missing_key_raises() -> None:
+    """symbol_map missing a dict key raises ValueError with clear message."""
+    df = _make_frame(ts_start=1_000, n=2, price=100_00000000)
+    bt = Backtester(data={}, seed=42, symbol_map={"OTHER": 5})
+    with pytest.raises(ValueError, match="symbol_map is missing entry"):
+        bt.run_arrow({"BTC": _reader(df)}, TickCollector())
+
+
+def test_e2e_run_arrow_dict_invalid_stream_raises_with_symbol_name() -> None:
+    """A non-stream value in the dict raises an error that names the bad symbol."""
+    bt = Backtester(data={}, seed=42)
+    with pytest.raises((ValueError, TypeError), match="BTC"):
+        bt.run_arrow({"BTC": "not_a_stream"}, TickCollector())
+
+
+def test_e2e_run_arrow_dict_malformed_schema_raises_with_symbol_name() -> None:
+    """A dict stream with a missing required column names the offending symbol."""
+    bad_df = pl.DataFrame(
+        {
+            "ts_exchange": [1_000, 2_000],
+            "qty": [1_00000000, 1_00000000],
+            "side": [1, -1],
+            "seq": [0, 1],
+        }
+    ).with_columns(pl.col("side").cast(pl.Int8))
+    bt = Backtester(data={}, seed=42)
+    with pytest.raises(ValueError, match="BTC"):
+        bt.run_arrow({"BTC": _reader(bad_df)}, TickCollector())
