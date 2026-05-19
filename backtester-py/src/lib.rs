@@ -535,7 +535,14 @@ impl Backtester {
 
     /// Run backtest using an Arrow RecordBatch stream (zero-copy ingestion).
     ///
-    /// Expects `stream` to implement the Arrow PyCapsule Interface (`__arrow_c_stream__`).
+    /// `stream` accepts two forms:
+    ///
+    /// - **Multi-symbol dict** `{"BTC": reader_btc, "ETH": reader_eth}`: each value must
+    ///   implement the Arrow PyCapsule Interface (`__arrow_c_stream__`). Symbol IDs are
+    ///   assigned in alphabetical key order (or from `symbol_map` if provided).
+    ///
+    /// - **Single stream** (legacy): a single object implementing `__arrow_c_stream__`.
+    ///   Always assigned `symbol_id = 1` for backward compatibility.
     #[pyo3(signature = (stream, strategy))]
     pub fn run_arrow(
         &self,
@@ -545,7 +552,7 @@ impl Backtester {
     ) -> PyResult<BacktestResult> {
         let config = EngineConfig {
             feed_latency_ns: self.feed_latency_ns,
-            order_update_latency_ns: self.feed_latency_ns,
+            order_update_latency_ns: self.order_update_latency_ns,
             mode: match self.python_mode.as_str() {
                 "batch" => EngineMode::Batch,
                 _ => EngineMode::Tick,
@@ -572,18 +579,54 @@ impl Backtester {
         let mut engine: Engine<ConservativeQueue, PyStrategy, ConstantLatency> =
             Engine::new(ConservativeQueue, strat, config, latency_model);
 
-        // Zero-copy ingestion
         let stream_bound = stream.bind(py);
-        let arrow_stream = get_arrow_stream(stream_bound)?;
 
-        // For now, assume single stream with symbol_id=1.
-        // TODO: support multi-stream or map metadata.
-        // Note: We currently do NOT use AsyncBatchIter here because calling PyArrow-backed
-        // streams from a background thread can be unsafe (GIL/refcounting) depending on the
-        // underlying implementation.
-        let source =
-            ArrowTickSource::try_new(1, arrow_stream).map_err(tick_source_error_to_pyerr)?;
-        engine.add_tick_source(Box::new(source));
+        if let Ok(streams_dict) = stream_bound.downcast::<PyDict>() {
+            // Multi-symbol path: stream is a {symbol_name: arrow_stream} dict.
+            // Note: We do NOT use AsyncBatchIter here — PyArrow-backed streams must be
+            // consumed on the thread that holds the GIL.
+            let mut keys: Vec<String> = streams_dict
+                .iter()
+                .map(|(k, _)| k.extract::<String>())
+                .collect::<PyResult<_>>()?;
+            keys.sort();
+
+            if keys.is_empty() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "run_arrow: stream dict must not be empty",
+                ));
+            }
+
+            let symbol_ids = build_symbol_ids(&keys, self.symbol_map.as_ref())?;
+
+            for k in &keys {
+                let symbol_id = symbol_ids.get(k).copied().ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err("missing symbol id")
+                })?;
+                let stream_any = streams_dict
+                    .get_item(k)?
+                    .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(k.clone()))?;
+                let arrow_stream = get_arrow_stream(&stream_any).map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "run_arrow: stream for symbol '{}': {}",
+                        k, e
+                    ))
+                })?;
+                let source = ArrowTickSource::try_new(symbol_id, arrow_stream).map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "run_arrow: stream for symbol '{}': {}",
+                        k, e
+                    ))
+                })?;
+                engine.add_tick_source(Box::new(source));
+            }
+        } else {
+            // Single-stream path (legacy): backward-compatible, symbol_id = 1.
+            let arrow_stream = get_arrow_stream(stream_bound)?;
+            let source =
+                ArrowTickSource::try_new(1, arrow_stream).map_err(tick_source_error_to_pyerr)?;
+            engine.add_tick_source(Box::new(source));
+        }
 
         engine.run().map_err(engine_error_to_pyerr)?;
 
