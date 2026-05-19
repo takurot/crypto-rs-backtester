@@ -317,6 +317,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Suggested tests**:
         - Rust: `test_tick_source_arrow_schema_aliases_smoke()`
         - Python E2E: `test_e2e_arrow_stream_ingestion_smoke()`
+    - **Issue #35 fix**: `run_arrow` now accepts `{"BTC": reader, "ETH": reader}` dict for multi-symbol. Single-stream form retained for backward compat (symbol_id=1). `symbol_map` honored in dict form. See `test_e2e_arrow_multi_symbol.py`.
 
 - [x] **5.2 Streaming TickSource + Lazy Event Scheduling** `[Depends on 1.3.1, 5.1]`
     - Introduce a `TickSource` abstraction per `(exchange, symbol)` stream that yields the next market-truth tick.
