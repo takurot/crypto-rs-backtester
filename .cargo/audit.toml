@@ -1,6 +1,10 @@
 [advisories]
-# fast-float 0.2.0 is a transitive dependency through polars 0.40.
-# RUSTSEC-2025-0003 (segfault) and RUSTSEC-2024-0379 (unsound): no fixed version
-# is available within the polars 0.40 dependency chain.
-# Revisit when polars is upgraded beyond 0.40.0.
+# Intentionally ignored advisories — review when polars is upgraded beyond 0.40.0.
+#
+# RUSTSEC-2025-0003: Segmentation fault due to lack of bound check in fast-float 0.2.0.
+#   Root cause: fast-float is a transitive dep locked by polars 0.40; no patched version
+#   exists within the polars 0.40 dep chain. No fix available without upgrading polars.
+#
+# RUSTSEC-2024-0379: Multiple soundness issues in fast-float 0.2.0.
+#   Same root cause as above.
 ignore = ["RUSTSEC-2025-0003", "RUSTSEC-2024-0379"]

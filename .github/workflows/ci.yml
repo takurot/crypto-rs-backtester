@@ -38,7 +38,7 @@ jobs:
           tool: cargo-audit
 
       - name: cargo audit
-        run: cargo audit
+        run: cargo audit --deny warnings
 
   python:
     name: Python E2E
