@@ -1,4 +1,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
+// PyO3 macros generate code that triggers useless_conversion on PyResult<T> method signatures;
+// this is a known interop artifact, not a real redundancy.
+#![allow(clippy::useless_conversion)]
 
 use std::collections::HashMap;
 
@@ -251,6 +254,7 @@ impl BacktestResult {
 impl Backtester {
     #[new]
     #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=0, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all", maker_fee_bps=0, taker_fee_bps=0, ring_buffer_size=10000, symbol_map=None))]
+    #[allow(clippy::too_many_arguments)] // Python API intentionally exposes many keyword arguments
     pub fn new(
         py: Python<'_>,
         data: Py<PyAny>,
@@ -507,7 +511,7 @@ impl Backtester {
 
                     // Push pre-loaded events.
                     for (ts, kind) in &events {
-                        engine.push_event(*ts, kind.clone());
+                        engine.push_event(*ts, *kind);
                     }
 
                     engine.run().map_err(engine_error_to_pyerr)?;
@@ -736,12 +740,12 @@ fn checksum_from_polars_data(py: Python<'_>, data: &Py<PyAny>) -> PyResult<i64> 
                 "column lengths mismatch",
             ));
         }
-        if let Some(seq) = seq_list {
-            if seq.len() != n {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "seq length mismatch",
-                ));
-            }
+        if let Some(seq) = seq_list
+            && seq.len() != n
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "seq length mismatch",
+            ));
         }
 
         for i in 0..n {
@@ -1204,19 +1208,19 @@ fn parse_polars_data(
                 "column lengths mismatch",
             ));
         }
-        if let Some(seq) = seq_list {
-            if seq.len() != n {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "seq length mismatch",
-                ));
-            }
+        if let Some(seq) = seq_list
+            && seq.len() != n
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "seq length mismatch",
+            ));
         }
-        if let Some(ts_local) = ts_local_list {
-            if ts_local.len() != n {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "ts_local length mismatch",
-                ));
-            }
+        if let Some(ts_local) = ts_local_list
+            && ts_local.len() != n
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "ts_local length mismatch",
+            ));
         }
 
         let symbol_id = symbol_ids.get(&k).copied().ok_or_else(|| {

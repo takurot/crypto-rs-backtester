@@ -29,8 +29,8 @@ jobs:
       - name: cargo test (core)
         run: cargo test -p backtester-core
 
-      - name: cargo clippy (core)
-        run: cargo clippy -p backtester-core --all-targets -- -D warnings
+      - name: cargo clippy (workspace)
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   python:
     name: Python E2E
