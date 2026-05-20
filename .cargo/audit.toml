@@ -1,0 +1,6 @@
+[advisories]
+# fast-float 0.2.0 is a transitive dependency through polars 0.40.
+# RUSTSEC-2025-0003 (segfault) and RUSTSEC-2024-0379 (unsound): no fixed version
+# is available within the polars 0.40 dependency chain.
+# Revisit when polars is upgraded beyond 0.40.0.
+ignore = ["RUSTSEC-2025-0003", "RUSTSEC-2024-0379"]

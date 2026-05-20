@@ -52,14 +52,14 @@ pub struct PyTick {
 impl PyTick {
     fn __getitem__(&self, key: &str) -> PyResult<PyObject> {
         Python::with_gil(|py| match key {
-            "ts_exchange" => Ok(self.ts_exchange.into_py(py)),
-            "ts_local" => Ok(self.ts_local.into_py(py)),
-            "seq" => Ok(self.seq.into_py(py)),
-            "symbol_id" => Ok(self.symbol_id.into_py(py)),
-            "price" => Ok(self.price.into_py(py)),
-            "qty" => Ok(self.qty.into_py(py)),
-            "side" => Ok(self.side.into_py(py)),
-            "flags" => Ok(self.flags.into_py(py)),
+            "ts_exchange" => Ok(self.ts_exchange.into_pyobject(py)?.into_any().unbind()),
+            "ts_local" => Ok(self.ts_local.into_pyobject(py)?.into_any().unbind()),
+            "seq" => Ok(self.seq.into_pyobject(py)?.into_any().unbind()),
+            "symbol_id" => Ok(self.symbol_id.into_pyobject(py)?.into_any().unbind()),
+            "price" => Ok(self.price.into_pyobject(py)?.into_any().unbind()),
+            "qty" => Ok(self.qty.into_pyobject(py)?.into_any().unbind()),
+            "side" => Ok(self.side.into_pyobject(py)?.into_any().unbind()),
+            "flags" => Ok(self.flags.into_pyobject(py)?.into_any().unbind()),
             _ => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
                 key.to_string(),
             )),
@@ -99,14 +99,14 @@ pub struct PyOrderReport {
 impl PyOrderReport {
     fn __getitem__(&self, key: &str) -> PyResult<PyObject> {
         Python::with_gil(|py| match key {
-            "order_id" => Ok(self.order_id.into_py(py)),
-            "symbol_id" => Ok(self.symbol_id.into_py(py)),
-            "status" => Ok(self.status.clone().into_py(py)),
-            "last_fill_qty" => Ok(self.last_fill_qty.into_py(py)),
-            "last_fill_price" => Ok(self.last_fill_price.into_py(py)),
-            "filled_qty" => Ok(self.filled_qty.into_py(py)),
-            "remaining_qty" => Ok(self.remaining_qty.into_py(py)),
-            "reason" => Ok(self.reason.clone().into_py(py)),
+            "order_id" => Ok(self.order_id.into_pyobject(py)?.into_any().unbind()),
+            "symbol_id" => Ok(self.symbol_id.into_pyobject(py)?.into_any().unbind()),
+            "status" => Ok(self.status.clone().into_pyobject(py)?.into_any().unbind()),
+            "last_fill_qty" => Ok(self.last_fill_qty.into_pyobject(py)?.into_any().unbind()),
+            "last_fill_price" => Ok(self.last_fill_price.into_pyobject(py)?.into_any().unbind()),
+            "filled_qty" => Ok(self.filled_qty.into_pyobject(py)?.into_any().unbind()),
+            "remaining_qty" => Ok(self.remaining_qty.into_pyobject(py)?.into_any().unbind()),
+            "reason" => Ok(self.reason.clone().into_pyobject(py)?.into_any().unbind()),
             _ => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
                 key.to_string(),
             )),
@@ -129,14 +129,14 @@ impl PyOrderReport {
     #[pyo3(signature = (key, default=None))]
     fn get(&self, key: &str, default: Option<PyObject>) -> PyResult<PyObject> {
         Python::with_gil(|py| match key {
-            "order_id" => Ok(self.order_id.into_py(py)),
-            "symbol_id" => Ok(self.symbol_id.into_py(py)),
-            "status" => Ok(self.status.clone().into_py(py)),
-            "last_fill_qty" => Ok(self.last_fill_qty.into_py(py)),
-            "last_fill_price" => Ok(self.last_fill_price.into_py(py)),
-            "filled_qty" => Ok(self.filled_qty.into_py(py)),
-            "remaining_qty" => Ok(self.remaining_qty.into_py(py)),
-            "reason" => Ok(self.reason.clone().into_py(py)),
+            "order_id" => Ok(self.order_id.into_pyobject(py)?.into_any().unbind()),
+            "symbol_id" => Ok(self.symbol_id.into_pyobject(py)?.into_any().unbind()),
+            "status" => Ok(self.status.clone().into_pyobject(py)?.into_any().unbind()),
+            "last_fill_qty" => Ok(self.last_fill_qty.into_pyobject(py)?.into_any().unbind()),
+            "last_fill_price" => Ok(self.last_fill_price.into_pyobject(py)?.into_any().unbind()),
+            "filled_qty" => Ok(self.filled_qty.into_pyobject(py)?.into_any().unbind()),
+            "remaining_qty" => Ok(self.remaining_qty.into_pyobject(py)?.into_any().unbind()),
+            "reason" => Ok(self.reason.clone().into_pyobject(py)?.into_any().unbind()),
             _ => Ok(default.unwrap_or_else(|| py.None())),
         })
     }
@@ -173,7 +173,7 @@ impl BacktestResult {
     }
 
     pub fn trades<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let out = PyList::empty_bound(py);
+        let out = PyList::empty(py);
         for t in &self.trades {
             out.append(trade_fill_to_pydict(py, t)?)?;
         }
@@ -214,7 +214,7 @@ impl BacktestResult {
         let fee_array: ArrayRef = Arc::new(fee_builder.finish());
         let is_taker_array: ArrayRef = Arc::new(is_taker_builder.finish());
 
-        let d = PyDict::new_bound(py);
+        let d = PyDict::new(py);
         d.set_item("ts_exchange", ts_array.to_data().to_pyarrow(py)?)?;
         d.set_item("symbol_id", symbol_array.to_data().to_pyarrow(py)?)?;
         d.set_item("order_id", order_array.to_data().to_pyarrow(py)?)?;
@@ -243,7 +243,7 @@ impl BacktestResult {
         let ts_array: ArrayRef = Arc::new(ts_builder.finish());
         let equity_array: ArrayRef = Arc::new(equity_builder.finish());
 
-        let d = PyDict::new_bound(py);
+        let d = PyDict::new(py);
         d.set_item("ts_exchange", ts_array.to_data().to_pyarrow(py)?)?;
         d.set_item("equity", equity_array.to_data().to_pyarrow(py)?)?;
         d.set_item("_len", n)?;
@@ -656,7 +656,7 @@ pub fn call_strategy_on_ticks(
     batch_size: usize,
     iterations: usize,
 ) -> PyResult<()> {
-    let ticks = PyList::new_bound(py, (0..batch_size).map(|i| i as i64));
+    let ticks = PyList::new(py, (0..batch_size).map(|i| i as i64))?;
     let strategy = strategy.bind(py);
     for _ in 0..iterations {
         strategy.call_method1("on_ticks", (&ticks,))?;
@@ -695,7 +695,7 @@ fn checksum_from_polars_data(py: Python<'_>, data: &Py<PyAny>) -> PyResult<i64> 
         // lf: polars.LazyFrame
         let df = lf.call_method0("collect")?;
 
-        let kwargs = PyDict::new_bound(py);
+        let kwargs = PyDict::new(py);
         kwargs.set_item("as_series", false)?;
         let dict_any = df.call_method("to_dict", (), Some(&kwargs))?;
         let dict = dict_any.downcast::<PyDict>()?;
@@ -837,7 +837,7 @@ impl CoreStrategy for PyStrategy {
             if strategy.hasattr("on_tick")? {
                 strategy.call_method1("on_tick", (tick_obj, py_ctx.clone_ref(py)))?;
             } else if strategy.hasattr("on_ticks")? {
-                let ticks = PyList::new_bound(py, [tick_obj]);
+                let ticks = PyList::new(py, [tick_obj])?;
                 strategy.call_method1("on_ticks", (ticks, py_ctx.clone_ref(py)))?;
             }
 
@@ -867,7 +867,7 @@ impl CoreStrategy for PyStrategy {
             if strategy.hasattr("on_order_update")? {
                 strategy.call_method1("on_order_update", (report_obj, py_ctx.clone_ref(py)))?;
             } else if strategy.hasattr("on_order_updates")? {
-                let reports = PyList::new_bound(py, [report_obj]);
+                let reports = PyList::new(py, [report_obj])?;
                 strategy.call_method1("on_order_updates", (reports, py_ctx.clone_ref(py)))?;
             }
 
@@ -975,7 +975,7 @@ impl CoreStrategy for PyStrategy {
                     .iter()
                     .map(|r| order_report_to_pyobject(py, r))
                     .collect::<PyResult<_>>()?;
-                let reports_list = PyList::new_bound(py, report_objs);
+                let reports_list = PyList::new(py, report_objs)?;
                 strategy.call_method1("on_order_updates", (reports_list, py_ctx.clone_ref(py)))?;
             } else {
                 // Fallback: call per-report
@@ -1042,7 +1042,7 @@ fn tick_to_pyobject(py: Python<'_>, tick: &Tick) -> PyResult<Py<PyAny>> {
 }
 
 fn trade_fill_to_pydict<'py>(py: Python<'py>, t: &TradeFill) -> PyResult<Bound<'py, PyDict>> {
-    let d = PyDict::new_bound(py);
+    let d = PyDict::new(py);
     d.set_item("ts_exchange", t.ts_exchange)?;
     d.set_item("symbol_id", t.symbol_id)?;
     d.set_item("order_id", t.order_id)?;
@@ -1058,7 +1058,7 @@ fn backtest_stats_to_pydict<'py>(
     py: Python<'py>,
     s: &BacktestStats,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let d = PyDict::new_bound(py);
+    let d = PyDict::new(py);
     d.set_item("total_trades", s.total_trades)?;
     d.set_item("win_rate", s.win_rate)?;
     d.set_item("profit_factor", s.profit_factor)?;
@@ -1155,7 +1155,7 @@ fn parse_polars_data(
         let df = lf_any.call_method0("collect")?;
 
         // Extract columns as Python lists for now.
-        let kwargs = PyDict::new_bound(py);
+        let kwargs = PyDict::new(py);
         kwargs.set_item("as_series", false)?;
         let dict_any = df.call_method("to_dict", (), Some(&kwargs))?;
         let dict = dict_any.downcast::<PyDict>()?;

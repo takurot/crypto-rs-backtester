@@ -32,6 +32,14 @@ jobs:
       - name: cargo clippy (workspace)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: cargo audit
+        run: cargo audit
+
   python:
     name: Python E2E
     runs-on: ubuntu-latest
