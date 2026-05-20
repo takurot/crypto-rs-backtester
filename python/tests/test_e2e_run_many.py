@@ -108,3 +108,47 @@ def test_run_many_different_strategies():
     # But since no trading, stats are identical.
     # The test passes if it runs without error.
 
+
+def test_e2e_run_many_order_update_latency_matches_run():
+    """run_many must honour order_update_latency_ns the same way run() does.
+
+    Regression test for Issue #46: run_many() was passing self.feed_latency_ns
+    as order_update_latency_ns in EngineConfig, ignoring the configured value.
+    """
+    lf = pl.DataFrame({
+        "ts_exchange": [1000, 2000],
+        "price": [100, 100],
+        "qty": [1, 1],
+        "side": pl.Series([1, -1], dtype=pl.Int8),
+        "seq": [0, 1],
+    }).lazy()
+
+    class FillStrategy:
+        def __init__(self):
+            self.report_ts: list = []
+            self.submitted = False
+
+        def on_tick(self, tick, ctx):
+            if not self.submitted:
+                self.submitted = True
+                ctx.submit_order(tick["symbol_id"], 1, tick["price"], tick["qty"])
+
+        def on_order_update(self, report, ctx):
+            self.report_ts.append(ctx.ts_local())
+
+    bt_run = Backtester(
+        data={"s": lf}, feed_latency_ns=0, order_update_latency_ns=5000, seed=42
+    )
+    s_run = FillStrategy()
+    bt_run.run(s_run)
+
+    bt_many = Backtester(
+        data={"s": lf}, feed_latency_ns=0, order_update_latency_ns=5000, seed=42
+    )
+    s_many = FillStrategy()
+    bt_many.run_many([s_many])
+
+    assert s_run.report_ts == s_many.report_ts, (
+        f"run() got {s_run.report_ts} but run_many() got {s_many.report_ts}"
+    )
+
