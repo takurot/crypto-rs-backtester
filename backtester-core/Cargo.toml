@@ -10,7 +10,7 @@ serde = { version = "1", features = ["derive"], optional = true }
 log = { version = "0.4", optional = true }
 rust_decimal = { version = "1", optional = true }
 memmap2 = "0.9"
-arrow = { version = "53", features = ["ffi", "ipc_compression"] }
+arrow = { version = "55", features = ["ffi", "ipc_compression"] }
 polars = { version = "0.40", optional = true }
 rayon = "1.11.0"
 rustc-hash = "2.1.1"
