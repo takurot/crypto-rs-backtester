@@ -468,7 +468,7 @@ impl Backtester {
             .map(|i| {
                 EngineConfig {
                     feed_latency_ns: self.feed_latency_ns,
-                    order_update_latency_ns: self.feed_latency_ns,
+                    order_update_latency_ns: self.order_update_latency_ns,
                     mode: match self.python_mode.as_str() {
                         "batch" => EngineMode::Batch,
                         _ => EngineMode::Tick,
