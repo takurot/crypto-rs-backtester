@@ -46,7 +46,7 @@ def _ensure_rust_extension_installed() -> None:
             f"maturin develop failed (exit {exc.returncode}). "
             f"Running interpreter: {sys.executable}. "
             "Ensure maturin is installed in this environment: "
-            "pip install maturin"
+            f'"{sys.executable}" -m pip install maturin'
         ) from exc
 
     importlib.invalidate_caches()
