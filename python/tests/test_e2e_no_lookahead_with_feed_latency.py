@@ -67,3 +67,28 @@ def test_no_lookahead_with_feed_latency() -> None:
     assert strat.order_update_ctx_ts_local == [4_000]
     assert any(r.status == "Filled" for r in strat.reports)
 
+
+def test_explicit_zero_order_update_latency_is_respected() -> None:
+    """Explicit order_update_latency_ns=0 must NOT fall back to feed_latency_ns.
+
+    Backward-compatibility guard: callers that explicitly pass 0 should still
+    get zero-latency order updates regardless of feed_latency_ns.
+    """
+    feed_latency_ns = 1_000
+    lf = make_ticks(feed_latency_ns=feed_latency_ns)
+
+    bt = rust_backtester.Backtester(
+        data={"binance:BTC/USDT": lf},
+        seed=42,
+        python_mode="tick",
+        batch_ms=100,
+        feed_latency_ns=feed_latency_ns,
+        order_update_latency_ns=0,
+    )
+    strat = _LookaheadGuard()
+    bt.run(strat)
+
+    # With explicit zero latency, order fills arrive at exchange time (no added delay).
+    assert strat.order_update_ctx_ts_local == [3_000]
+    assert any(r.status == "Filled" for r in strat.reports)
+
