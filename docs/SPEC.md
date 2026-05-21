@@ -594,50 +594,85 @@ fn bench_python_callback_batch(c: &mut Criterion) { ... }
 
 ## 8. Development Roadmap
 
-### Phase 1: Core Engine (MVP)
-- [ ] Rust matching engine with L2 support
-- [ ] Conservative queue model
-- [ ] Constant latency model
-- [ ] Basic event loop
-- [ ] Single venue support
+> **Source of truth for task-level detail**: `docs/PLAN.md`.
+> This section provides a high-level status overview; `PLAN.md` tracks individual sub-tasks, test names, and phase dependencies.
 
-### Phase 2: Python Integration
-- [ ] PyO3 bindings
-- [ ] Polars zero-copy data ingestion
-- [ ] Python strategy interface
-- [ ] Result export as DataFrame
+### Implemented
 
-### Phase 3: Advanced Microstructure
-- [ ] Latency jitter (Log-Normal, Poisson)
-- [ ] Volume-clock queue model
-- [ ] L3 data support
-- [ ] Funding rate simulation
+**Phase 0 — Quality Gates & Tooling**
+- [x] Rust unit/integration test harness (`cargo test` < 1s baseline)
+- [x] Determinism regression tests
+- [x] `pytest` + `maturin` E2E workflow
+- [x] Criterion benchmark harness
 
-### Phase 4: Multi-Venue & Production
-- [ ] Global event queue
-- [ ] Cross-exchange arbitrage support
-- [ ] Kill switch & risk limits
-- [ ] Benchmark suite
-- [ ] Documentation & examples
+**Phase 1 — Core Engine (MVP)**
+- [x] Rust matching engine with L2 order book
+- [x] Conservative (price-time) queue model
+- [x] Constant latency model (`feed_latency_ns`, `order_update_latency_ns`)
+- [x] Global discrete-event loop with deterministic tie-breaking (`ts_sim`)
+- [x] MarketView & look-ahead prevention (strategy sees only feed-delayed data)
 
-### Phase 5: Extensions (Future)
-- [ ] True zero-copy Arrow ingestion (C Data Interface) + streaming tick sources
-- [ ] Zero-copy result export (trades/equity curve) back to Python
-- [ ] Trade log retention policies (ring buffer / summary-only / none)
-- [ ] Parallel parameter sweep runner (deterministic)
-- [ ] MEV simulation hooks (for DeFi research)
-- [ ] Interpolated latency from pcap
-- [ ] Reg NMS / SIP simulation
-- [ ] Live trading adapter (same strategy code)
+**Phase 2 — Python Integration**
+- [x] PyO3 bindings via `maturin`
+- [x] Polars zero-copy data ingestion (Arrow memory handover)
+- [x] Python strategy interface (`on_tick` / `on_ticks` / `on_order_update`)
+- [x] Result export as Polars-compatible DataFrame (trades, equity curve)
 
-### Phase 6: Performance Optimizations (Future)
-- [ ] Compiler tuning (LTO, codegen-units, panic=abort)
-- [ ] FxHashMap for hot lookups (exchanges, orders)
-- [ ] Arrow-based Python callbacks (zero-copy tick batches)
-- [ ] Incremental statistics accumulation
-- [ ] SIMD-accelerated stats (Sharpe, drawdown)
-- [ ] Rayon parallel parameter sweeps
-- [ ] Cache-friendly struct layouts
+**Phase 3 — Advanced Microstructure**
+- [x] Latency jitter (log-normal / Poisson models)
+- [x] Volume-clock queue model
+- [x] Funding rate simulation
+
+**Phase 4 — Multi-Venue & Production**
+- [x] Global event queue with multi-symbol / multi-venue scheduling
+- [x] Multi-venue support (cross-exchange strategies)
+- [x] Benchmark suite (Criterion + CI artifact upload)
+- [x] Error propagation across FFI boundary (Result / Python exceptions)
+
+**Phase 5 — Scale & Zero-Copy**
+- [x] True zero-copy Arrow ingestion (C Data Interface / `run_arrow`)
+- [x] Streaming `TickSource` + lazy event scheduling
+- [x] Zero-copy result export (trades, equity curve) back to Python
+- [x] Trade-log retention policies (ring buffer / all / none)
+- [x] Parallel parameter sweep runner (`run_many`, deterministic with Rayon)
+- [x] Benchmark regression observability (CI artifacts)
+
+**Phase 6 — Performance Optimizations**
+- [x] Compiler tuning (LTO, codegen-units=1, panic=abort)
+- [x] FxHashMap for hot lookups (exchanges, orders)
+- [x] Arrow-based zero-copy tick batches for strategy callbacks
+- [x] Incremental / streaming statistics accumulation
+- [x] SIMD-accelerated stats (Sharpe, drawdown)
+- [x] Rayon-based parallel sweeps
+- [x] Cache-friendly struct layouts
+
+**Phase 7 — Advanced Performance**
+- [x] PGO (Profile-Guided Optimisation) build pipeline
+- [x] AVX2/AVX-512 tick parsing
+- [x] Arena allocator and SmallVec for hot paths
+- [x] Memory-mapped file ingestion
+- [x] Loop unrolling hints
+- [x] Cache prefetching hints
+- [x] Auto-tuning batch size
+
+---
+
+### Partially Implemented
+
+| Item | Status | Notes |
+|------|--------|-------|
+| L3 order-book support | Not started | Requires new `L3Update` event type and depth-of-book matching logic |
+| Kill switch & risk limits | Not started | Pre-trade risk checks; requires new `RiskGuard` component |
+| Documentation & examples | Partial | README, architecture comments present; API reference and tutorials incomplete |
+
+---
+
+### Future (Intentionally Out of Current Scope)
+
+- **Interpolated latency from pcap** — Empirical latency modelling from captured network traces
+- **Reg NMS / SIP simulation** — US equities market-structure rules
+- **MEV simulation hooks** — DeFi/on-chain research extension
+- **Live trading adapter** — Running the same strategy code against a live venue
 
 ## Appendix A: Fixed-Point Arithmetic
 
