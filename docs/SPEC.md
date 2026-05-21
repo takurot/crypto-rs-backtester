@@ -616,7 +616,7 @@ fn bench_python_callback_batch(c: &mut Criterion) { ... }
 - [x] PyO3 bindings via `maturin`
 - [x] Polars zero-copy data ingestion (Arrow memory handover)
 - [x] Python strategy interface (`on_tick` / `on_ticks` / `on_order_update`)
-- [x] Result export as Polars-compatible DataFrame (trades, equity curve)
+- [x] Result export as Polars-compatible columnar format (Arrow arrays; trades, equity curve)
 
 **Phase 3 — Advanced Microstructure**
 - [x] Latency jitter (log-normal / Poisson models)
@@ -629,29 +629,30 @@ fn bench_python_callback_batch(c: &mut Criterion) { ... }
 - [x] Benchmark suite (Criterion + CI artifact upload)
 - [x] Error propagation across FFI boundary (Result / Python exceptions)
 
-**Phase 5 — Scale & Zero-Copy**
-- [x] True zero-copy Arrow ingestion (C Data Interface / `run_arrow`)
+**Phase 5 — Scale & Arrow Integration**
+- [x] Arrow C Data Interface ingestion (`run_arrow`)
 - [x] Streaming `TickSource` + lazy event scheduling
-- [x] Zero-copy result export (trades, equity curve) back to Python
+- [x] Arrow-compatible columnar result export (trades, equity curve)
 - [x] Trade-log retention policies (ring buffer / all / none)
 - [x] Parallel parameter sweep runner (`run_many`, deterministic with Rayon)
 - [x] Benchmark regression observability (CI artifacts)
 
 **Phase 6 — Performance Optimizations**
-- [x] Compiler tuning (LTO, codegen-units=1, panic=abort)
-- [x] FxHashMap for hot lookups (exchanges, orders)
-- [x] Arrow-based zero-copy tick batches for strategy callbacks
+- [x] Compiler tuning (LTO=fat, codegen-units=1; `panic=abort` intentionally skipped — incompatible with PyO3 unwinding)
+- [x] FxHashMap for hot lookups
+- [x] Arrow-based columnar tick batches for strategy callbacks
 - [x] Incremental / streaming statistics accumulation
-- [x] SIMD-accelerated stats (Sharpe, drawdown)
+- [x] SIMD-accelerated stats (Sharpe, drawdown) via `wide` crate
 - [x] Rayon-based parallel sweeps
 - [x] Cache-friendly struct layouts
 
-**Phase 7 — Advanced Performance**
+**Phase 7 — Advanced Performance (selected items)**
 - [x] PGO (Profile-Guided Optimisation) build pipeline
-- [x] AVX2/AVX-512 tick parsing
-- [x] Arena allocator and SmallVec for hot paths
-- [x] Memory-mapped file ingestion
-- [x] Loop unrolling hints
+- [x] SmallVec for order buckets (inline storage for small order sets)
+- [x] Memory-mapped file ingestion (`MmapFileLoader`)
+- [x] Async I/O overlap with threaded pre-fetching (`AsyncBatchIter`)
+- [x] Compressed Arrow IPC streams (LZ4/ZSTD via `ipc_compression` feature)
+- [x] Cold path annotations (`#[cold]`, `#[inline(always)]` on hot paths)
 - [x] Cache prefetching hints
 - [x] Auto-tuning batch size
 
@@ -663,7 +664,21 @@ fn bench_python_callback_batch(c: &mut Criterion) { ... }
 |------|--------|-------|
 | L3 order-book support | Not started | Requires new `L3Update` event type and depth-of-book matching logic |
 | Kill switch & risk limits | Not started | Pre-trade risk checks; requires new `RiskGuard` component |
-| Documentation & examples | Partial | README, architecture comments present; API reference and tutorials incomplete |
+| Documentation & examples | Partial | README and architecture comments present; API reference and tutorials incomplete |
+
+---
+
+### Explored / Not Adopted
+
+These were benchmarked and reverted due to regression or negligible benefit:
+
+| Item | Outcome |
+|------|---------|
+| AVX2/AVX-512 tick parsing | ~20% regression (SoA→AoS scatter overhead); reverted |
+| SIMD-accelerated EventQueue (4-ary heap) | No measurable improvement vs `std::BinaryHeap`; reverted |
+| Loop unrolling for batch processing | ~10% regression vs compiler-optimised loop; reverted |
+| Arena allocator for hot paths | Profiling showed `Vec` allocation is not the bottleneck; skipped |
+| FxHashMap for order structs | Batch-mode regression; reverted (Vec reuse kept instead) |
 
 ---
 
