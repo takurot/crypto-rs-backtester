@@ -45,13 +45,6 @@ class _LookaheadGuard:
         self.reports.append(report)
 
 
-import pytest
-
-
-@pytest.mark.skip(reason="Needs investigation: order update timing changed with Phase 6.3")
-# TODO: Re-enable this test once latency logic is verified.
-# Expected behavior was delivery at 4000 (3000 exchange tick + 1000 latency),
-# but currently observing delivery at 3000. Potential regression or intentional change in Phase 6.3.
 def test_no_lookahead_with_feed_latency() -> None:
     feed_latency_ns = 1_000
     lf = make_ticks(feed_latency_ns=feed_latency_ns)

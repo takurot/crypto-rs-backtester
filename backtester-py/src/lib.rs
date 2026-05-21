@@ -253,13 +253,13 @@ impl BacktestResult {
 #[pymethods]
 impl Backtester {
     #[new]
-    #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=0, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all", maker_fee_bps=0, taker_fee_bps=0, ring_buffer_size=10000, symbol_map=None))]
+    #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=None, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all", maker_fee_bps=0, taker_fee_bps=0, ring_buffer_size=10000, symbol_map=None))]
     #[allow(clippy::too_many_arguments)] // Python API intentionally exposes many keyword arguments
     pub fn new(
         py: Python<'_>,
         data: Py<PyAny>,
         feed_latency_ns: i64,
-        order_update_latency_ns: i64,
+        order_update_latency_ns: Option<i64>,
         python_mode: &str,
         batch_ms: i64,
         seed: u64,
@@ -333,7 +333,7 @@ impl Backtester {
         Ok(Backtester {
             data,
             feed_latency_ns,
-            order_update_latency_ns,
+            order_update_latency_ns: order_update_latency_ns.unwrap_or(feed_latency_ns),
             python_mode: python_mode.to_string(),
             batch_ms,
             seed,
