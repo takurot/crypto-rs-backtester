@@ -45,13 +45,6 @@ class _LookaheadGuard:
         self.reports.append(report)
 
 
-import pytest
-
-
-@pytest.mark.skip(reason="Needs investigation: order update timing changed with Phase 6.3")
-# TODO: Re-enable this test once latency logic is verified.
-# Expected behavior was delivery at 4000 (3000 exchange tick + 1000 latency),
-# but currently observing delivery at 3000. Potential regression or intentional change in Phase 6.3.
 def test_no_lookahead_with_feed_latency() -> None:
     feed_latency_ns = 1_000
     lf = make_ticks(feed_latency_ns=feed_latency_ns)
@@ -72,5 +65,30 @@ def test_no_lookahead_with_feed_latency() -> None:
     # If the engine incorrectly allowed the order to arrive before the truth tick at ts_exchange=2_000,
     # we'd see a fill delivered at ts_local=3_000. Correct behavior fills on ts_exchange=3_000 => delivery at 4_000.
     assert strat.order_update_ctx_ts_local == [4_000]
+    assert any(r.status == "Filled" for r in strat.reports)
+
+
+def test_explicit_zero_order_update_latency_is_respected() -> None:
+    """Explicit order_update_latency_ns=0 must NOT fall back to feed_latency_ns.
+
+    Backward-compatibility guard: callers that explicitly pass 0 should still
+    get zero-latency order updates regardless of feed_latency_ns.
+    """
+    feed_latency_ns = 1_000
+    lf = make_ticks(feed_latency_ns=feed_latency_ns)
+
+    bt = rust_backtester.Backtester(
+        data={"binance:BTC/USDT": lf},
+        seed=42,
+        python_mode="tick",
+        batch_ms=100,
+        feed_latency_ns=feed_latency_ns,
+        order_update_latency_ns=0,
+    )
+    strat = _LookaheadGuard()
+    bt.run(strat)
+
+    # With explicit zero latency, order fills arrive at exchange time (no added delay).
+    assert strat.order_update_ctx_ts_local == [3_000]
     assert any(r.status == "Filled" for r in strat.reports)
 
