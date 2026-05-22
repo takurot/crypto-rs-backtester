@@ -421,6 +421,7 @@ impl Backtester {
             &self.queue_model,
             &self.latency_model,
             self.feed_latency_ns,
+            self.order_update_latency_ns,
             self.latency_mean_ns,
             self.latency_std_ns,
             strat,
@@ -517,6 +518,7 @@ impl Backtester {
             .collect();
 
         let latency_ns = self.feed_latency_ns;
+        let order_latency_ns = self.order_update_latency_ns;
         let q_model = self.queue_model.clone();
         let l_model = self.latency_model.clone();
         let l_mean = self.latency_mean_ns;
@@ -530,7 +532,14 @@ impl Backtester {
                 .map(|(strategy, config)| {
                     let strat = PyStrategy { obj: strategy };
                     let mut engine = AnyEngine::new(
-                        &q_model, &l_model, latency_ns, l_mean, l_std, strat, config,
+                        &q_model,
+                        &l_model,
+                        latency_ns,
+                        order_latency_ns,
+                        l_mean,
+                        l_std,
+                        strat,
+                        config,
                     );
 
                     // Push pre-loaded events (global_seq is the sort tie-breaker).
@@ -590,6 +599,7 @@ impl Backtester {
             &self.queue_model,
             &self.latency_model,
             self.feed_latency_ns,
+            self.order_update_latency_ns,
             self.latency_mean_ns,
             self.latency_std_ns,
             strat,
@@ -739,6 +749,7 @@ impl AnyEngine {
         queue_model: &str,
         latency_model: &str,
         feed_latency_ns: i64,
+        order_latency_ns: i64,
         latency_mean_ns: i64,
         latency_std_ns: i64,
         strat: PyStrategy,
@@ -746,7 +757,7 @@ impl AnyEngine {
     ) -> Self {
         let const_l = ConstantLatency {
             feed_latency_ns,
-            order_latency_ns: 0,
+            order_latency_ns,
         };
         let log_l = LogNormalJitter {
             mean_ns: latency_mean_ns,

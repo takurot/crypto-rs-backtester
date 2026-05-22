@@ -62,11 +62,12 @@ def test_no_lookahead_with_feed_latency() -> None:
     # Strategy observes each tick at ts_local = ts_exchange + feed_latency.
     assert strat.tick_ctx_ts_local == [2_000, 3_000, 4_000]
 
-    # Two order reports:
-    # 1. Open (ack) at ts_local=3_000 (order acked at ts=2_000 + latency=1_000).
-    # 2. Filled at ts_local=4_000 (fill at ts_exchange=3_000 + latency=1_000).
+    # Two order reports (order_update_latency_ns = feed_latency_ns = 1_000):
+    # - Order submitted at ts_local=2_000, arrives at exchange at ts=2_000+1_000=3_000 (order ack).
+    # - Open report delivered at ts=3_000+1_000=4_000.
+    # - Fill at ts_exchange=3_000 (order is Open when tick-3 truth fires), report at 3_000+1_000=4_000.
     # The fill is correctly on ts_exchange=3_000 (not 2_000), confirming no look-ahead.
-    assert strat.order_update_ctx_ts_local == [3_000, 4_000]
+    assert strat.order_update_ctx_ts_local == [4_000, 4_000]
     assert any(r.status == "Filled" for r in strat.reports)
 
 
