@@ -18,7 +18,7 @@ use backtester_core::engine::{EngineConfig, EngineError, EngineMode, Strategy as
 use backtester_core::latency_model::ConstantLatency;
 use backtester_core::queue_model::ConservativeQueue;
 use backtester_core::stats::{equity_curve_from_pnl_deltas, full_pnl_history};
-use backtester_core::tick_source::ArrowTickSource; // Import TickSource types
+use backtester_core::tick_source::{ArrowTickSource, TickSource};
 use backtester_core::types::{Order, OrderReport, OrderType, Side, Tick};
 use backtester_core::{BacktestStats, TradeFill, TradeLogMode};
 use backtester_core::{Context as CoreContext, Engine, EventKind, TickSourceError};
@@ -696,76 +696,26 @@ fn checksum_from_polars_data(py: Python<'_>, data: &Py<PyAny>) -> PyResult<i64> 
     let data_dict = data_any.downcast::<PyDict>()?;
 
     let mut checksum: i128 = 0;
-    for (_k, lf) in data_dict.iter() {
-        // lf: polars.LazyFrame
+    for (k_obj, lf) in data_dict.iter() {
+        let symbol_id: u32 = 1; // checksum doesn't need real symbol_ids
+
+        // Arrow path: no per-row Python calls.
         let df = lf.call_method0("collect")?;
-
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("as_series", false)?;
-        let dict_any = df.call_method("to_dict", (), Some(&kwargs))?;
-        let dict = dict_any.downcast::<PyDict>()?;
-
-        let ts_exchange_any = dict
-            .get_item("ts_exchange")?
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("missing ts_exchange"))?;
-        let price_any = dict
-            .get_item("price")?
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("missing price"))?;
-        let qty_any = dict
-            .get_item("qty")?
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("missing qty"))?;
-        let side_any = dict
-            .get_item("side")?
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("missing side"))?;
-
-        let seq_any = dict.get_item("seq")?;
-
-        let ts_exchange = ts_exchange_any.downcast::<PyList>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>("ts_exchange must be a list")
+        let table = df.call_method0("to_arrow")?;
+        let stream = get_arrow_stream(&table)?;
+        let mut source = ArrowTickSource::try_new(symbol_id, stream).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "checksum: {}: {e}",
+                k_obj.str().map(|s| s.to_string()).unwrap_or_default()
+            ))
         })?;
-        let price = price_any
-            .downcast::<PyList>()
-            .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>("price must be a list"))?;
-        let qty = qty_any
-            .downcast::<PyList>()
-            .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>("qty must be a list"))?;
-        let side = side_any
-            .downcast::<PyList>()
-            .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>("side must be a list"))?;
-        let seq_list = match seq_any.as_ref() {
-            Some(any) => Some(any.downcast::<PyList>().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyTypeError, _>("seq must be a list")
-            })?),
-            None => None,
-        };
 
-        let n = ts_exchange.len();
-        if price.len() != n || qty.len() != n || side.len() != n {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "column lengths mismatch",
-            ));
-        }
-        if let Some(seq) = seq_list
-            && seq.len() != n
-        {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "seq length mismatch",
-            ));
-        }
-
-        for i in 0..n {
-            let ts: i64 = ts_exchange.get_item(i)?.extract()?;
-            let p: i64 = price.get_item(i)?.extract()?;
-            let q: i64 = qty.get_item(i)?.extract()?;
-            let s: i64 = side.get_item(i)?.extract()?;
-            checksum += ts as i128;
-            checksum += p as i128;
-            checksum += q as i128;
-            checksum += s as i128;
-            if let Some(seq) = seq_list {
-                let seq_i: i64 = seq.get_item(i)?.extract()?;
-                checksum += seq_i as i128;
-            }
+        while let Some(tick) = source.next().map_err(tick_source_error_to_pyerr)? {
+            checksum += tick.ts_exchange as i128;
+            checksum += tick.price as i128;
+            checksum += tick.qty as i128;
+            checksum += tick.side.as_i8() as i128;
+            checksum += tick.seq as i128;
         }
     }
 
@@ -1141,7 +1091,10 @@ fn build_symbol_ids(
     }
 }
 
-// Helper to parse data once.
+// Helper to parse data once using the Arrow columnar path.
+//
+// Replaces the old O(n) Python list-item approach with ArrowTickSource iteration,
+// reducing per-row Python API calls from 4–5 per row to O(batches).
 fn parse_polars_data(
     py: Python<'_>,
     data: &Py<PyAny>,
@@ -1168,115 +1121,33 @@ fn parse_polars_data(
             .get_item(&k)?
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("missing key"))?;
 
-        // Collect LazyFrame -> DataFrame in Python (materialization strategy TBD).
-        let df = lf_any.call_method0("collect")?;
-
-        // Extract columns as Python lists for now.
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("as_series", false)?;
-        let dict_any = df.call_method("to_dict", (), Some(&kwargs))?;
-        let dict = dict_any.downcast::<PyDict>()?;
-
-        let ts_exchange_any = dict
-            .get_item("ts_exchange")?
-            .or_else(|| dict.get_item("ts_event").ok().flatten())
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("missing ts_exchange"))?;
-        let price_any = dict
-            .get_item("price")?
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("missing price"))?;
-        let qty_any = dict
-            .get_item("qty")?
-            .or_else(|| dict.get_item("size").ok().flatten())
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("missing qty"))?;
-        let side_any = dict
-            .get_item("side")?
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("missing side"))?;
-        let seq_any = dict.get_item("seq")?;
-        let ts_local_any = dict.get_item("ts_local")?;
-
-        let ts_exchange = ts_exchange_any.downcast::<PyList>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>("ts_exchange must be a list")
-        })?;
-        let price = price_any
-            .downcast::<PyList>()
-            .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>("price must be a list"))?;
-        let qty = qty_any
-            .downcast::<PyList>()
-            .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>("qty must be a list"))?;
-        let side = side_any
-            .downcast::<PyList>()
-            .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>("side must be a list"))?;
-        let seq_list = match seq_any.as_ref() {
-            Some(any) => Some(any.downcast::<PyList>().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyTypeError, _>("seq must be a list")
-            })?),
-            None => None,
-        };
-        let ts_local_list = match ts_local_any.as_ref() {
-            Some(any) => Some(any.downcast::<PyList>().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyTypeError, _>("ts_local must be a list")
-            })?),
-            None => None,
-        };
-
-        let n = ts_exchange.len();
-        if price.len() != n || qty.len() != n || side.len() != n {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "column lengths mismatch",
-            ));
-        }
-        if let Some(seq) = seq_list
-            && seq.len() != n
-        {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "seq length mismatch",
-            ));
-        }
-        if let Some(ts_local) = ts_local_list
-            && ts_local.len() != n
-        {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "ts_local length mismatch",
-            ));
-        }
-
         let symbol_id = symbol_ids.get(&k).copied().ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("missing symbol id")
         })?;
-        for i in 0..n {
-            let ts_ex: i64 = ts_exchange.get_item(i)?.extract()?;
-            let ts_local: i64 = match ts_local_list.as_ref() {
-                Some(tsl) => tsl.get_item(i)?.extract()?,
-                None => ts_ex + feed_latency_ns,
-            };
-            let p: i64 = price.get_item(i)?.extract()?;
-            let q: i64 = qty.get_item(i)?.extract()?;
-            let s: i8 = side.get_item(i)?.extract()?;
-            let side = Side::try_from(s).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("invalid side: {e}"))
-            })?;
-            let row_seq: u64 = match seq_list.as_ref() {
-                Some(seq) => seq.get_item(i)?.extract()?,
-                None => i as u64,
+
+        // Arrow path: collect → to_arrow → stream → columnar reads (no per-row Python calls).
+        let df = lf_any.call_method0("collect")?;
+        let table = df.call_method0("to_arrow")?;
+        let stream = get_arrow_stream(&table)?;
+        let mut source =
+            ArrowTickSource::try_new(symbol_id, stream).map_err(tick_source_error_to_pyerr)?;
+
+        while let Some(tick) = source.next().map_err(tick_source_error_to_pyerr)? {
+            // ts_local == 0 is the ArrowTickSource sentinel for "column absent".
+            // Mirror the engine's own logic (engine.rs:417) for consistency.
+            let ts_local = if tick.ts_local == 0 {
+                tick.ts_exchange.saturating_add(feed_latency_ns)
+            } else {
+                tick.ts_local
             };
 
             let truth_tick = Tick {
-                ts_exchange: ts_ex,
-                ts_local: ts_ex,
-                seq: row_seq,
-                symbol_id,
-                price: p,
-                qty: q,
-                side,
-                flags: 0x01, // trade-only for now
+                ts_local: tick.ts_exchange,
+                ..tick
             };
-            let delivered_tick = Tick {
-                ts_exchange: ts_ex,
-                ts_local,
-                ..truth_tick
-            };
+            let delivered_tick = Tick { ts_local, ..tick };
 
-            events.push((ts_ex, global_seq, EventKind::Tick(truth_tick)));
+            events.push((tick.ts_exchange, global_seq, EventKind::Tick(truth_tick)));
             global_seq += 1;
             events.push((
                 ts_local,
