@@ -514,8 +514,8 @@ impl Backtester {
                     let mut engine: Engine<ConservativeQueue, PyStrategy, ConstantLatency> =
                         Engine::new(ConservativeQueue, strat, config, latency_model);
 
-                    // Push pre-loaded events.
-                    for (ts, kind) in &events {
+                    // Push pre-loaded events (seq is the sort tie-breaker; not forwarded to engine).
+                    for (ts, _seq, kind) in &events {
                         engine.push_event(*ts, *kind);
                     }
 
@@ -1136,7 +1136,7 @@ fn parse_polars_data(
     data: &Py<PyAny>,
     feed_latency_ns: i64,
     explicit_symbol_map: Option<&HashMap<String, u32>>,
-) -> PyResult<Vec<(i64, EventKind)>> {
+) -> PyResult<Vec<(i64, u64, EventKind)>> {
     let data_any = data.bind(py);
     let data_dict = data_any.downcast::<PyDict>()?;
 
@@ -1149,7 +1149,8 @@ fn parse_polars_data(
 
     let symbol_ids = build_symbol_ids(&keys, explicit_symbol_map)?;
 
-    let mut events = Vec::new();
+    let mut events: Vec<(i64, u64, EventKind)> = Vec::new();
+    let mut global_seq: u64 = 0;
 
     for k in keys {
         let lf_any = data_dict
@@ -1264,11 +1265,17 @@ fn parse_polars_data(
                 ..truth_tick
             };
 
-            events.push((ts_ex, EventKind::Tick(truth_tick)));
-            events.push((ts_local, EventKind::TickDelivery(delivered_tick)));
+            events.push((ts_ex, global_seq, EventKind::Tick(truth_tick)));
+            global_seq += 1;
+            events.push((
+                ts_local,
+                global_seq,
+                EventKind::TickDelivery(delivered_tick),
+            ));
+            global_seq += 1;
         }
     }
-    events.sort_by_key(|(ts, _)| *ts);
+    events.sort_by_key(|(ts, seq, _)| (*ts, *seq));
     Ok(events)
 }
 

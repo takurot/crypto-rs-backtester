@@ -64,3 +64,30 @@ def test_e2e_reproducible_seed() -> None:
     assert s1.ticks == s2.ticks
     assert s1.reports == s2.reports
 
+
+def test_run_many_same_ts_multi_symbol_order_is_deterministic() -> None:
+    """run_many must deliver ticks in the same order across identical runs (Issue #56).
+
+    Two symbols share ts_exchange=1_000 to stress-test tie-breaking in parse_polars_data.
+    Both strategies in the run_many call must observe the same tick sequence.
+    """
+    lf_a = make_ticks(ts_exchange=[1_000, 2_000], price=100_00000000, qty=1_00000000, side=[1, -1])
+    lf_b = make_ticks(ts_exchange=[1_000, 3_000], price=200_00000000, qty=1_00000000, side=[-1, 1])
+
+    bt = rust_backtester.Backtester(
+        data={"symbol_a": lf_a, "symbol_b": lf_b},
+        seed=42,
+        python_mode="tick",
+        batch_ms=100,
+        feed_latency_ns=0,
+    )
+
+    s1 = _Recorder()
+    s2 = _Recorder()
+    results = bt.run_many([s1, s2])  # noqa: F841
+
+    # Both strategies receive identical pre-loaded event streams — tick orders must match.
+    assert s1.ticks == s2.ticks, (
+        f"run_many tick order non-deterministic: s1={s1.ticks!r}, s2={s2.ticks!r}"
+    )
+
