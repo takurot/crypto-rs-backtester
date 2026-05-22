@@ -15,10 +15,10 @@ use arrow::pyarrow::ToPyArrow;
 use arrow::record_batch::RecordBatch;
 use arrow_utils::get_arrow_stream;
 use backtester_core::engine::{EngineConfig, EngineError, EngineMode, Strategy as CoreStrategy};
-use backtester_core::latency_model::ConstantLatency;
-use backtester_core::queue_model::ConservativeQueue;
+use backtester_core::latency_model::{ConstantLatency, LogNormalJitter};
+use backtester_core::queue_model::{ConservativeQueue, VolumeClockQueue};
 use backtester_core::stats::{equity_curve_from_pnl_deltas, full_pnl_history};
-use backtester_core::tick_source::ArrowTickSource; // Import TickSource types
+use backtester_core::tick_source::{ArrowTickSource, TickSource};
 use backtester_core::types::{Order, OrderReport, OrderType, Side, Tick};
 use backtester_core::{BacktestStats, TradeFill, TradeLogMode};
 use backtester_core::{Context as CoreContext, Engine, EventKind, TickSourceError};
@@ -157,6 +157,14 @@ pub struct Backtester {
     ring_buffer_size: usize,
     /// Explicit symbol→id mapping. When `None`, alphabetical order is used.
     symbol_map: Option<HashMap<String, u32>>,
+    /// Queue model: "conservative" (default) or "volume_clock".
+    queue_model: String,
+    /// Latency model: "constant" (default) or "log_normal".
+    latency_model: String,
+    /// Mean for log-normal feed/order latency (ns). Only used when `latency_model="log_normal"`.
+    latency_mean_ns: i64,
+    /// Std-dev for log-normal feed/order latency (ns). Only used when `latency_model="log_normal"`.
+    latency_std_ns: i64,
 }
 
 #[pyclass]
@@ -253,7 +261,7 @@ impl BacktestResult {
 #[pymethods]
 impl Backtester {
     #[new]
-    #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=None, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all", maker_fee_bps=0, taker_fee_bps=0, ring_buffer_size=10000, symbol_map=None))]
+    #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=None, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all", maker_fee_bps=0, taker_fee_bps=0, ring_buffer_size=10000, symbol_map=None, queue_model="conservative", latency_model="constant", latency_mean_ns=0, latency_std_ns=0))]
     #[allow(clippy::too_many_arguments)] // Python API intentionally exposes many keyword arguments
     pub fn new(
         py: Python<'_>,
@@ -268,6 +276,10 @@ impl Backtester {
         taker_fee_bps: i64,
         ring_buffer_size: usize,
         symbol_map: Option<Py<PyAny>>,
+        queue_model: &str,
+        latency_model: &str,
+        latency_mean_ns: i64,
+        latency_std_ns: i64,
     ) -> PyResult<Self> {
         if ring_buffer_size == 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -335,6 +347,17 @@ impl Backtester {
             }
         };
 
+        if !matches!(queue_model, "conservative" | "volume_clock") {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unknown queue_model '{queue_model}'; expected 'conservative' or 'volume_clock'"
+            )));
+        }
+        if !matches!(latency_model, "constant" | "log_normal") {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unknown latency_model '{latency_model}'; expected 'constant' or 'log_normal'"
+            )));
+        }
+
         Ok(Backtester {
             data,
             feed_latency_ns,
@@ -347,6 +370,10 @@ impl Backtester {
             taker_fee_bps,
             ring_buffer_size,
             symbol_map: resolved_symbol_map,
+            queue_model: queue_model.to_string(),
+            latency_model: latency_model.to_string(),
+            latency_mean_ns,
+            latency_std_ns,
         })
     }
 
@@ -390,12 +417,15 @@ impl Backtester {
         };
 
         let strat = PyStrategy { obj: strategy };
-        let latency_model = ConstantLatency {
-            feed_latency_ns: self.feed_latency_ns,
-            order_latency_ns: 0,
-        };
-        let mut engine: Engine<ConservativeQueue, PyStrategy, ConstantLatency> =
-            Engine::new(ConservativeQueue, strat, config, latency_model);
+        let mut engine = AnyEngine::new(
+            &self.queue_model,
+            &self.latency_model,
+            self.feed_latency_ns,
+            self.latency_mean_ns,
+            self.latency_std_ns,
+            strat,
+            config,
+        );
 
         // Zero-copy ingestion path
         let data_any = self.data.bind(py);
@@ -417,27 +447,16 @@ impl Backtester {
                 .get_item(&k)?
                 .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("missing key"))?;
 
-            // Convert Polars LazyFrame -> DataFrame -> Arrow Table -> Arrow Stream
             let df = lf_any.call_method0("collect")?;
             let table = df.call_method0("to_arrow")?;
             let stream = get_arrow_stream(&table)?;
-
             let source =
                 ArrowTickSource::try_new(symbol_id, stream).map_err(tick_source_error_to_pyerr)?;
             engine.add_tick_source(Box::new(source));
         }
 
-        engine.run().map_err(engine_error_to_pyerr)?;
-
-        let trades = engine.trade_log().fills_vec();
-        let stats = engine.stats();
-        let all_pnl = full_pnl_history(engine.trade_log());
-        let equity_curve = equity_curve_from_pnl_deltas(&all_pnl);
-        Ok(BacktestResult {
-            trades,
-            stats,
-            equity_curve,
-        })
+        engine.run()?;
+        Ok(engine.extract_result())
     }
 
     /// Run multiple backtests in parallel.
@@ -498,6 +517,10 @@ impl Backtester {
             .collect();
 
         let latency_ns = self.feed_latency_ns;
+        let q_model = self.queue_model.clone();
+        let l_model = self.latency_model.clone();
+        let l_mean = self.latency_mean_ns;
+        let l_std = self.latency_std_ns;
 
         // 3. Parallel execution releasing GIL.
         let results: PyResult<Vec<BacktestResult>> = py.allow_threads(move || {
@@ -506,35 +529,17 @@ impl Backtester {
                 .zip(configs.into_par_iter())
                 .map(|(strategy, config)| {
                     let strat = PyStrategy { obj: strategy };
-                    let latency_model = ConstantLatency {
-                        feed_latency_ns: latency_ns,
-                        order_latency_ns: 0,
-                    };
+                    let mut engine = AnyEngine::new(
+                        &q_model, &l_model, latency_ns, l_mean, l_std, strat, config,
+                    );
 
-                    let mut engine: Engine<ConservativeQueue, PyStrategy, ConstantLatency> =
-                        Engine::new(ConservativeQueue, strat, config, latency_model);
-
-                    // Push pre-loaded events (seq is the sort tie-breaker; not forwarded to engine).
+                    // Push pre-loaded events (global_seq is the sort tie-breaker).
                     for (ts, _seq, kind) in &events {
                         engine.push_event(*ts, *kind);
                     }
 
-                    engine.run().map_err(engine_error_to_pyerr)?;
-
-                    let trades = engine.trade_log().fills_vec();
-                    let stats = engine.stats();
-                    // full_pnl_history is not available here? It's a helper function, should be available if imported.
-                    // But we are in a closure. 'full_pnl_history' is a function item, so it's global.
-                    // However, we need to make sure 'full_pnl_history' is public/accessible in this module.
-                    // It is imported at top of file.
-                    let all_pnl = full_pnl_history(engine.trade_log());
-                    let equity_curve = equity_curve_from_pnl_deltas(&all_pnl);
-
-                    Ok(BacktestResult {
-                        trades,
-                        stats,
-                        equity_curve,
-                    })
+                    engine.run()?;
+                    Ok(engine.extract_result())
                 })
                 .collect()
         });
@@ -581,12 +586,15 @@ impl Backtester {
         };
 
         let strat = PyStrategy { obj: strategy };
-        let latency_model = ConstantLatency {
-            feed_latency_ns: self.feed_latency_ns,
-            order_latency_ns: 0,
-        };
-        let mut engine: Engine<ConservativeQueue, PyStrategy, ConstantLatency> =
-            Engine::new(ConservativeQueue, strat, config, latency_model);
+        let mut engine = AnyEngine::new(
+            &self.queue_model,
+            &self.latency_model,
+            self.feed_latency_ns,
+            self.latency_mean_ns,
+            self.latency_std_ns,
+            strat,
+            config,
+        );
 
         let stream_bound = stream.bind(py);
 
@@ -637,17 +645,8 @@ impl Backtester {
             engine.add_tick_source(Box::new(source));
         }
 
-        engine.run().map_err(engine_error_to_pyerr)?;
-
-        let trades = engine.trade_log().fills_vec();
-        let stats = engine.stats();
-        let all_pnl = full_pnl_history(engine.trade_log());
-        let equity_curve = equity_curve_from_pnl_deltas(&all_pnl);
-        Ok(BacktestResult {
-            trades,
-            stats,
-            equity_curve,
-        })
+        engine.run()?;
+        Ok(engine.extract_result())
     }
 }
 
@@ -770,6 +769,113 @@ fn checksum_from_polars_data(py: Python<'_>, data: &Py<PyAny>) -> PyResult<i64> 
     }
 
     Ok(checksum as i64)
+}
+
+// ── Engine dispatch ──────────────────────────────────────────────────────────
+//
+// Engine<Q, S, L> is generic over queue and latency models. AnyEngine wraps
+// the four supported combinations (2 queues × 2 latency models) so callers
+// don't need to replicate dispatch logic in every run method.
+
+enum AnyEngine {
+    ConservativeConstant(Engine<ConservativeQueue, PyStrategy, ConstantLatency>),
+    VolumeClockConstant(Engine<VolumeClockQueue, PyStrategy, ConstantLatency>),
+    ConservativeLogNormal(Engine<ConservativeQueue, PyStrategy, LogNormalJitter>),
+    VolumeClockLogNormal(Engine<VolumeClockQueue, PyStrategy, LogNormalJitter>),
+}
+
+impl AnyEngine {
+    fn new(
+        queue_model: &str,
+        latency_model: &str,
+        feed_latency_ns: i64,
+        latency_mean_ns: i64,
+        latency_std_ns: i64,
+        strat: PyStrategy,
+        config: EngineConfig,
+    ) -> Self {
+        let const_l = ConstantLatency {
+            feed_latency_ns,
+            order_latency_ns: 0,
+        };
+        let log_l = LogNormalJitter {
+            mean_ns: latency_mean_ns,
+            std_dev_ns: latency_std_ns,
+        };
+
+        match (queue_model, latency_model) {
+            ("volume_clock", "log_normal") => {
+                AnyEngine::VolumeClockLogNormal(Engine::new(VolumeClockQueue, strat, config, log_l))
+            }
+            ("volume_clock", _) => AnyEngine::VolumeClockConstant(Engine::new(
+                VolumeClockQueue,
+                strat,
+                config,
+                const_l,
+            )),
+            (_, "log_normal") => AnyEngine::ConservativeLogNormal(Engine::new(
+                ConservativeQueue,
+                strat,
+                config,
+                log_l,
+            )),
+            _ => AnyEngine::ConservativeConstant(Engine::new(
+                ConservativeQueue,
+                strat,
+                config,
+                const_l,
+            )),
+        }
+    }
+
+    fn add_tick_source(&mut self, source: Box<dyn TickSource>) {
+        match self {
+            AnyEngine::ConservativeConstant(e) => e.add_tick_source(source),
+            AnyEngine::VolumeClockConstant(e) => e.add_tick_source(source),
+            AnyEngine::ConservativeLogNormal(e) => e.add_tick_source(source),
+            AnyEngine::VolumeClockLogNormal(e) => e.add_tick_source(source),
+        }
+    }
+
+    fn push_event(&mut self, ts_sim: i64, kind: EventKind) {
+        match self {
+            AnyEngine::ConservativeConstant(e) => e.push_event(ts_sim, kind),
+            AnyEngine::VolumeClockConstant(e) => e.push_event(ts_sim, kind),
+            AnyEngine::ConservativeLogNormal(e) => e.push_event(ts_sim, kind),
+            AnyEngine::VolumeClockLogNormal(e) => e.push_event(ts_sim, kind),
+        }
+    }
+
+    fn run(&mut self) -> PyResult<()> {
+        match self {
+            AnyEngine::ConservativeConstant(e) => e.run().map_err(engine_error_to_pyerr),
+            AnyEngine::VolumeClockConstant(e) => e.run().map_err(engine_error_to_pyerr),
+            AnyEngine::ConservativeLogNormal(e) => e.run().map_err(engine_error_to_pyerr),
+            AnyEngine::VolumeClockLogNormal(e) => e.run().map_err(engine_error_to_pyerr),
+        }
+    }
+
+    fn extract_result(&mut self) -> BacktestResult {
+        macro_rules! extract {
+            ($e:expr) => {{
+                let trades = $e.trade_log().fills_vec();
+                let stats = $e.stats();
+                let all_pnl = full_pnl_history($e.trade_log());
+                let equity_curve = equity_curve_from_pnl_deltas(&all_pnl);
+                BacktestResult {
+                    trades,
+                    stats,
+                    equity_curve,
+                }
+            }};
+        }
+        match self {
+            AnyEngine::ConservativeConstant(e) => extract!(e),
+            AnyEngine::VolumeClockConstant(e) => extract!(e),
+            AnyEngine::ConservativeLogNormal(e) => extract!(e),
+            AnyEngine::VolumeClockLogNormal(e) => extract!(e),
+        }
+    }
 }
 
 #[derive(Debug)]
