@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import polars as pl
+import pytest
 import rust_backtester
 
 
@@ -113,11 +114,8 @@ def test_e2e_queue_model_volume_clock_fills_after_queue_depleted() -> None:
 
 def test_e2e_queue_model_invalid_raises() -> None:
     """An unknown queue_model string must raise ValueError at construction."""
-    try:
+    with pytest.raises(ValueError, match="queue_model"):
         rust_backtester.Backtester(data={"BTC": make_small_ticks()}, queue_model="fifo")
-        assert False, "Expected ValueError"
-    except ValueError as e:
-        assert "queue_model" in str(e)
 
 
 # ── latency_model tests ───────────────────────────────────────────────────────
@@ -174,11 +172,8 @@ def test_e2e_latency_model_log_normal_with_zero_std_is_deterministic() -> None:
 
 def test_e2e_latency_model_invalid_raises() -> None:
     """An unknown latency_model string must raise ValueError at construction."""
-    try:
+    with pytest.raises(ValueError, match="latency_model"):
         rust_backtester.Backtester(data={"BTC": make_small_ticks()}, latency_model="gaussian")
-        assert False, "Expected ValueError"
-    except ValueError as e:
-        assert "latency_model" in str(e)
 
 
 def test_e2e_queue_and_latency_model_combined() -> None:
