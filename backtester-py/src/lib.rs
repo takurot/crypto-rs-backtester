@@ -1141,11 +1141,18 @@ fn parse_polars_data(
                 tick.ts_local
             };
 
+            // Preserve flags: 0x01 (trade) that the old per-row path hard-coded.
+            // ArrowTickSource emits flags=0 (no flags column in the schema).
             let truth_tick = Tick {
                 ts_local: tick.ts_exchange,
+                flags: 0x01,
                 ..tick
             };
-            let delivered_tick = Tick { ts_local, ..tick };
+            let delivered_tick = Tick {
+                ts_local,
+                flags: 0x01,
+                ..tick
+            };
 
             events.push((tick.ts_exchange, global_seq, EventKind::Tick(truth_tick)));
             global_seq += 1;
