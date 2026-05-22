@@ -745,6 +745,7 @@ enum AnyEngine {
 }
 
 impl AnyEngine {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         queue_model: &str,
         latency_model: &str,
