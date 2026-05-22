@@ -67,6 +67,7 @@ def test_e2e_strategy_batch_exception_is_returned_to_python():
         backtester.run_arrow(_reader_from_frame(_valid_frame()), RaisingBatchStrategy())
 
 
-def test_taker_fee_bps_nonzero_raises_value_error():
-    with pytest.raises(ValueError, match="taker_fee_bps"):
-        Backtester(data={}, taker_fee_bps=5)
+def test_taker_fee_bps_nonzero_is_accepted():
+    # taker_fee_bps is now implemented (market orders); non-zero values are valid.
+    bt = Backtester(data={}, taker_fee_bps=5)
+    assert bt is not None

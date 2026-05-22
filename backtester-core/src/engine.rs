@@ -46,10 +46,8 @@ pub struct EngineConfig {
     /// Maker fee in basis points (1 bps = 0.01%). Applied to passive fills via QueueModel.
     /// E.g., `2` = 0.02% maker fee. Fixed-point safe: fee = notional * bps / 10_000.
     pub maker_fee_bps: i64,
-    /// Taker fee in basis points (1 bps = 0.01%). **Not yet applied.**
-    /// Reserved for aggressive/market-order fills (market orders are not yet implemented).
-    /// Setting a non-zero value has no effect on current backtests; it is stored for forward
-    /// compatibility so that configs remain stable once taker fills are introduced.
+    /// Taker fee in basis points (1 bps = 0.01%). Applied to market order fills (`is_taker=true`).
+    /// E.g., `5` = 0.05% taker fee. Fixed-point safe: fee = notional * bps / 10_000.
     pub taker_fee_bps: i64,
 }
 
@@ -546,14 +544,62 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 self.exchange_mut(update.symbol_id).apply_l2_update(&update);
             }
             EventKind::Order(order) => {
-                let order_id = order.order_id;
-                self.exchange_mut(order.symbol_id).submit_order(order);
-                let dt = self
-                    .latency_model
-                    .sample_order_latency(self.now_ts_sim, &mut self.rng)
-                    .max(0);
-                let ts_ack = self.now_ts_sim.saturating_add(dt);
-                self.push_event(ts_ack, EventKind::OrderAck { order_id });
+                use crate::types::OrderType;
+                if order.order_type == OrderType::Market {
+                    // Market orders fill immediately at best bid/ask; fall back to last trade price.
+                    let taker_fee_bps = self.config.taker_fee_bps;
+                    let fallback = self
+                        .truth_last_trade_by_symbol
+                        .get(&order.symbol_id)
+                        .map(|t| t.price);
+                    let report = self
+                        .exchange_mut(order.symbol_id)
+                        .fill_market_order(order, fallback);
+                    match report {
+                        Ok(r) if r.status == crate::types::OrderState::Filled => {
+                            let fee =
+                                compute_fee(r.last_fill_price, r.last_fill_qty, taker_fee_bps);
+                            let trade_fill = TradeFill {
+                                ts_exchange: self.now_ts_sim,
+                                symbol_id: order.symbol_id,
+                                order_id: order.order_id,
+                                side: order.side,
+                                price: r.last_fill_price,
+                                qty: r.last_fill_qty,
+                                fee,
+                                is_taker: true,
+                            };
+                            self.trade_log.push_fill(trade_fill);
+                            let pnl_delta =
+                                self.account
+                                    .on_fill(&order, r.last_fill_qty, r.last_fill_price);
+                            let net_pnl = pnl_delta.saturating_sub(fee);
+                            self.trade_log.push_pnl_delta(self.now_ts_sim, net_pnl);
+                            let ts_delivery = self
+                                .now_ts_sim
+                                .saturating_add(self.config.order_update_latency_ns);
+                            self.push_event(ts_delivery, EventKind::OrderReport(r));
+                        }
+                        Ok(r) => {
+                            // Rejected (empty book): deliver reject report.
+                            let ts_delivery = self
+                                .now_ts_sim
+                                .saturating_add(self.config.order_update_latency_ns);
+                            self.push_event(ts_delivery, EventKind::OrderReport(r));
+                        }
+                        Err(_) => {} // Silently ignore invalid market orders (e.g., no-side)
+                    }
+                    // Market orders don't enter order_symbol_by_id because they never live in the book.
+                } else {
+                    let order_id = order.order_id;
+                    self.exchange_mut(order.symbol_id).submit_order(order);
+                    let dt = self
+                        .latency_model
+                        .sample_order_latency(self.now_ts_sim, &mut self.rng)
+                        .max(0);
+                    let ts_ack = self.now_ts_sim.saturating_add(dt);
+                    self.push_event(ts_ack, EventKind::OrderAck { order_id });
+                }
             }
             EventKind::OrderAck { order_id } => {
                 if let Some(&symbol_id) = self.order_symbol_by_id.get(&order_id)
@@ -1252,6 +1298,142 @@ mod tests {
         });
         let stats = calculate_stats(&log);
         assert_eq!(stats.total_fees_paid, 4_000_000);
+    }
+
+    /// Market order test strategy: submits a market buy on the first tick, records reports.
+    #[derive(Debug, Default)]
+    struct MarketOrderStrategy {
+        submitted: bool,
+        reports: Vec<OrderReport>,
+    }
+
+    impl Strategy for MarketOrderStrategy {
+        type Error = std::convert::Infallible;
+
+        fn on_tick(&mut self, tick: &Tick, ctx: &mut Context<'_>) -> Result<(), Self::Error> {
+            if !self.submitted {
+                self.submitted = true;
+                ctx.submit_order(Order {
+                    order_id: 0,
+                    ts_submit: ctx.ts_local(),
+                    seq: 0,
+                    symbol_id: tick.symbol_id,
+                    side: Side::Buy,
+                    order_type: OrderType::Market,
+                    price: 0,
+                    qty: 1_00000000,
+                });
+            }
+            Ok(())
+        }
+
+        fn on_order_update(
+            &mut self,
+            report: &OrderReport,
+            _ctx: &mut Context<'_>,
+        ) -> Result<(), Self::Error> {
+            self.reports.push(*report);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_engine_market_order_fills_immediately_at_best_ask() {
+        let config = EngineConfig {
+            feed_latency_ns: 0,
+            order_update_latency_ns: 0,
+            mode: EngineMode::Tick,
+            taker_fee_bps: 5,
+            ..Default::default()
+        };
+        let strategy = MarketOrderStrategy::default();
+        let latency_model = ConstantLatency {
+            feed_latency_ns: 0,
+            order_latency_ns: 0,
+        };
+        let mut eng = Engine::new(ConservativeQueue, strategy, config, latency_model);
+
+        // Seed the L2 book with an ask at 101.
+        let ask_update = crate::types::L2Update {
+            ts_exchange: 500,
+            seq: 0,
+            price: 101_00000000,
+            qty: 10_00000000,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            side: Side::Sell,
+        };
+        eng.push_event(500, EventKind::L2Update(ask_update));
+
+        // Tick delivery at 1_000 triggers the market buy.
+        let t0 = Tick {
+            ts_exchange: 1_000,
+            ts_local: 1_000,
+            seq: 0,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            price: 100_00000000,
+            qty: 1_00000000,
+            side: Side::Buy,
+            flags: 0x01,
+        };
+        eng.push_event(1_000, EventKind::Tick(t0));
+        eng.push_event(1_000, EventKind::TickDelivery(t0));
+
+        eng.run().expect("engine run");
+
+        // Strategy should receive exactly one Filled report (no Open step for market orders).
+        let reports = &eng.strategy.reports;
+        assert_eq!(reports.len(), 1, "market order: one report expected");
+        assert_eq!(reports[0].status, OrderState::Filled);
+        assert_eq!(reports[0].last_fill_price, 101_00000000);
+        assert_eq!(reports[0].last_fill_qty, 1_00000000);
+
+        // Taker fee: 5 bps on 101 * 1 = 5_050_000
+        let stats = eng.stats();
+        assert_eq!(stats.total_fees_paid, 5_050_000);
+        assert!(stats.total_fees_paid > 0);
+    }
+
+    #[test]
+    fn test_engine_market_order_fills_at_last_trade_price_when_book_empty() {
+        // No explicit L2 update, but the truth tick establishes a last-trade price.
+        // Market order should fall back to that price and fill.
+        let config = EngineConfig {
+            feed_latency_ns: 0,
+            order_update_latency_ns: 0,
+            mode: EngineMode::Tick,
+            ..Default::default()
+        };
+        let strategy = MarketOrderStrategy::default();
+        let latency_model = ConstantLatency {
+            feed_latency_ns: 0,
+            order_latency_ns: 0,
+        };
+        let mut eng = Engine::new(ConservativeQueue, strategy, config, latency_model);
+
+        let t0 = Tick {
+            ts_exchange: 1_000,
+            ts_local: 1_000,
+            seq: 0,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            price: 100_00000000,
+            qty: 1_00000000,
+            side: Side::Buy,
+            flags: 0x01,
+        };
+        eng.push_event(1_000, EventKind::Tick(t0));
+        eng.push_event(1_000, EventKind::TickDelivery(t0));
+
+        eng.run().expect("engine run");
+
+        let reports = &eng.strategy.reports;
+        assert_eq!(
+            reports.len(),
+            1,
+            "market order with fallback: one report expected"
+        );
+        // Fills at the last trade price (fallback).
+        assert_eq!(reports[0].status, OrderState::Filled);
+        assert_eq!(reports[0].last_fill_price, 100_00000000);
     }
 
     /// Round-trip: buy at 100, then sell at 101 with 2 bps maker fee on each leg.

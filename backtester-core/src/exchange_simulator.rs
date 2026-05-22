@@ -159,6 +159,49 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
         }
     }
 
+    /// Immediately fill a market order at the current best bid/ask price.
+    ///
+    /// `fallback_price`: used when the L2 book has no level on the required side
+    /// (common when only trade-tick data is available). Typically the last trade price.
+    ///
+    /// Returns `Ok(OrderReport)` — either `Filled` or `Rejected` (when both book and
+    /// fallback are unavailable). Market orders are never registered in `orders` or
+    /// `buckets`; they settle instantly.
+    pub fn fill_market_order(
+        &self,
+        order: Order,
+        fallback_price: Option<i64>,
+    ) -> Result<OrderReport, &'static str> {
+        let best_price = match order.side {
+            Side::Buy => self.book.best_ask().map(|(p, _)| p).or(fallback_price),
+            Side::Sell => self.book.best_bid().map(|(p, _)| p).or(fallback_price),
+            Side::None => return Err("market order has no side"),
+        };
+
+        match best_price {
+            Some(price) => Ok(OrderReport {
+                order_id: order.order_id,
+                symbol_id: order.symbol_id,
+                status: OrderState::Filled,
+                last_fill_qty: order.qty,
+                last_fill_price: price,
+                filled_qty: order.qty,
+                remaining_qty: 0,
+                reason: None,
+            }),
+            None => Ok(OrderReport {
+                order_id: order.order_id,
+                symbol_id: order.symbol_id,
+                status: OrderState::Rejected,
+                last_fill_qty: 0,
+                last_fill_price: 0,
+                filled_qty: 0,
+                remaining_qty: order.qty,
+                reason: Some("no liquidity: book is empty on required side"),
+            }),
+        }
+    }
+
     /// Process a market trade tick and generate order reports for any fills.
     #[inline(always)]
     pub fn on_trade(&mut self, trade: Tick, reports: &mut Vec<OrderReport>) {
@@ -355,6 +398,74 @@ mod tests {
         assert_eq!(reports[0].filled_qty, 3);
         assert_eq!(reports[0].remaining_qty, 0);
         assert_eq!(ex.get_order_state(id), Some(OrderState::Filled));
+    }
+
+    #[test]
+    fn test_exchange_market_buy_fills_at_best_ask() {
+        let mut ex = ExchangeSimulator::new(NoopQueue);
+        ex.apply_l2_update(&fixtures::l2_update(1_000, 0, 101, 5, Side::Sell));
+
+        let order = Order {
+            order_id: 42,
+            ts_submit: 2_000,
+            seq: 0,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            side: Side::Buy,
+            order_type: OrderType::Market,
+            price: 0,
+            qty: 1_00000000,
+        };
+
+        let report = ex.fill_market_order(order, None).expect("should fill");
+        assert_eq!(report.status, OrderState::Filled);
+        assert_eq!(report.last_fill_qty, 1_00000000);
+        assert_eq!(report.last_fill_price, 101);
+        assert_eq!(report.filled_qty, 1_00000000);
+        assert_eq!(report.remaining_qty, 0);
+        assert!(report.reason.is_none());
+    }
+
+    #[test]
+    fn test_exchange_market_sell_fills_at_best_bid() {
+        let mut ex = ExchangeSimulator::new(NoopQueue);
+        ex.apply_l2_update(&fixtures::l2_update(1_000, 0, 100, 5, Side::Buy));
+
+        let order = Order {
+            order_id: 43,
+            ts_submit: 2_000,
+            seq: 0,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            side: Side::Sell,
+            order_type: OrderType::Market,
+            price: 0,
+            qty: 1_00000000,
+        };
+
+        let report = ex.fill_market_order(order, None).expect("should fill");
+        assert_eq!(report.status, OrderState::Filled);
+        assert_eq!(report.last_fill_price, 100);
+    }
+
+    #[test]
+    fn test_exchange_market_order_rejected_when_book_empty() {
+        let ex = ExchangeSimulator::new(NoopQueue);
+
+        let order = Order {
+            order_id: 44,
+            ts_submit: 2_000,
+            seq: 0,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            side: Side::Buy,
+            order_type: OrderType::Market,
+            price: 0,
+            qty: 1_00000000,
+        };
+
+        let report = ex
+            .fill_market_order(order, None)
+            .expect("should return report");
+        assert_eq!(report.status, OrderState::Rejected);
+        assert!(report.reason.is_some());
     }
 
     #[test]

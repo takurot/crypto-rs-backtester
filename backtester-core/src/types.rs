@@ -70,6 +70,7 @@ impl TryFrom<i8> for Side {
 #[repr(u8)]
 pub enum OrderType {
     Limit = 0,
+    Market = 1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
