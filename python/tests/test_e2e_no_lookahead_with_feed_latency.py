@@ -62,9 +62,11 @@ def test_no_lookahead_with_feed_latency() -> None:
     # Strategy observes each tick at ts_local = ts_exchange + feed_latency.
     assert strat.tick_ctx_ts_local == [2_000, 3_000, 4_000]
 
-    # If the engine incorrectly allowed the order to arrive before the truth tick at ts_exchange=2_000,
-    # we'd see a fill delivered at ts_local=3_000. Correct behavior fills on ts_exchange=3_000 => delivery at 4_000.
-    assert strat.order_update_ctx_ts_local == [4_000]
+    # Two order reports:
+    # 1. Open (ack) at ts_local=3_000 (order acked at ts=2_000 + latency=1_000).
+    # 2. Filled at ts_local=4_000 (fill at ts_exchange=3_000 + latency=1_000).
+    # The fill is correctly on ts_exchange=3_000 (not 2_000), confirming no look-ahead.
+    assert strat.order_update_ctx_ts_local == [3_000, 4_000]
     assert any(r.status == "Filled" for r in strat.reports)
 
 
@@ -88,7 +90,9 @@ def test_explicit_zero_order_update_latency_is_respected() -> None:
     strat = _LookaheadGuard()
     bt.run(strat)
 
-    # With explicit zero latency, order fills arrive at exchange time (no added delay).
-    assert strat.order_update_ctx_ts_local == [3_000]
+    # With explicit zero latency:
+    # 1. Open report at ts_local=2_000 (ack at ts=2_000 + latency=0).
+    # 2. Filled at ts_local=3_000 (fill at ts_exchange=3_000 + latency=0).
+    assert strat.order_update_ctx_ts_local == [2_000, 3_000]
     assert any(r.status == "Filled" for r in strat.reports)
 

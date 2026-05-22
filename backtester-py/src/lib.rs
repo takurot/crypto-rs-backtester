@@ -786,6 +786,9 @@ enum PyCommand {
         qty: i64,
         seq: u64,
     },
+    CancelOrder {
+        order_id: u64,
+    },
 }
 
 #[pyclass]
@@ -812,6 +815,11 @@ impl PyContext {
             qty,
             seq,
         });
+        Ok(())
+    }
+
+    pub fn cancel_order(&mut self, order_id: u64) -> PyResult<()> {
+        self.commands.push(PyCommand::CancelOrder { order_id });
         Ok(())
     }
 }
@@ -1026,6 +1034,9 @@ fn apply_py_ctx_commands(
                     price,
                     qty,
                 });
+            }
+            PyCommand::CancelOrder { order_id } => {
+                ctx.cancel_order(order_id);
             }
         }
     }

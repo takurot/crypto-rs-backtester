@@ -556,8 +556,13 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 self.push_event(ts_ack, EventKind::OrderAck { order_id });
             }
             EventKind::OrderAck { order_id } => {
-                if let Some(&symbol_id) = self.order_symbol_by_id.get(&order_id) {
-                    let _ = self.exchange_mut(symbol_id).ack_new(order_id);
+                if let Some(&symbol_id) = self.order_symbol_by_id.get(&order_id)
+                    && let Ok(report) = self.exchange_mut(symbol_id).ack_new(order_id)
+                {
+                    let ts_delivery = self
+                        .now_ts_sim
+                        .saturating_add(self.config.order_update_latency_ns);
+                    self.push_event(ts_delivery, EventKind::OrderReport(report));
                 }
             }
             EventKind::OrderCancel { order_id } => {
@@ -841,11 +846,14 @@ mod tests {
         eng.run().expect("engine run");
 
         let reports = &eng.strategy.reports;
-        assert_eq!(reports.len(), 1);
+        // Expect Open (ack) + Filled reports.
+        assert_eq!(reports.len(), 2);
         assert_eq!(reports[0].order_id, 1);
-        assert_eq!(reports[0].status, OrderState::Filled);
-        assert_eq!(reports[0].last_fill_qty, 1_00000000);
-        assert_eq!(reports[0].remaining_qty, 0);
+        assert_eq!(reports[0].status, OrderState::Open);
+        assert_eq!(reports[1].order_id, 1);
+        assert_eq!(reports[1].status, OrderState::Filled);
+        assert_eq!(reports[1].last_fill_qty, 1_00000000);
+        assert_eq!(reports[1].remaining_qty, 0);
     }
 
     #[test]
@@ -994,10 +1002,14 @@ mod tests {
                 .is_some()
         );
 
-        // 2. ACK order
+        // 2. ACK order → also schedules OrderReport(Open).
         eng.step().expect("engine step").expect("ack");
 
-        // 3. Fill order
+        // 3. Process Open report (strategy receives order_id here).
+        eng.step().expect("engine step").expect("open report");
+        assert_eq!(eng.order_symbol_by_id.len(), 1);
+
+        // 4. Fill order
         let t1 = Tick {
             ts_exchange: 2_000,
             ts_local: 2_000,
@@ -1014,8 +1026,8 @@ mod tests {
         // At this point OrderReport(Filled) is scheduled but not processed.
         assert_eq!(eng.order_symbol_by_id.len(), 1);
 
-        // 4. Process OrderReport
-        eng.step().expect("engine step").expect("report");
+        // 5. Process Filled OrderReport.
+        eng.step().expect("engine step").expect("filled report");
 
         // Cleanup should have happened.
         assert_eq!(eng.order_symbol_by_id.len(), 0);
