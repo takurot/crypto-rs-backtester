@@ -95,8 +95,8 @@ def test_batch_wakeup_on_order_update_delivery() -> None:
     # First wake is time-based at 1_001_000.
     assert strat.tick_wake_ts[0] == 1_001_000
 
-    # Without order-update wake, the next time-based wake would be 2_500_000.
-    # We expect an order update wake at 1_500_000 instead.
-    assert strat.order_update_wake_ts == [1_500_000]
+    # Order ack (Open) fires immediately after the first tick wakeup → wakeup at 1_001_000.
+    # Fill occurs at tick-2 (ts=1_500_000) → wakeup at 1_500_000 instead of next batch timer.
+    assert strat.order_update_wake_ts == [1_001_000, 1_500_000]
     assert any(r.get("status") == "Filled" for r in strat.seen_reports)
 

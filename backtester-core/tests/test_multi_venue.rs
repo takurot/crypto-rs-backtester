@@ -243,13 +243,15 @@ fn test_arbitrage_two_venues_smoke() {
     assert_eq!(eng.account().position_qty(SYMBOL_A), 1_00000000);
     assert_eq!(eng.account().position_qty(SYMBOL_B), -1_00000000);
 
-    // Both orders should have produced fill reports.
-    assert_eq!(eng.strategy().reports.len(), 2);
-    assert!(
+    // Each order produces Open + Filled reports = 4 total.
+    assert_eq!(eng.strategy().reports.len(), 4);
+    assert_eq!(
         eng.strategy()
             .reports
             .iter()
-            .all(|r| r.status == backtester_core::types::OrderState::Filled)
+            .filter(|r| r.status == backtester_core::types::OrderState::Filled)
+            .count(),
+        2
     );
 }
 
@@ -312,5 +314,6 @@ fn test_multi_venue_l2_updates_do_not_leak_between_symbols() {
     eng.run().expect("engine run");
 
     assert_eq!(eng.account().position_qty(SYMBOL_A), 1_00000000);
-    assert_eq!(eng.strategy().reports.len(), 1);
+    // Open + Filled = 2 reports.
+    assert_eq!(eng.strategy().reports.len(), 2);
 }

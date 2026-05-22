@@ -73,13 +73,26 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
     }
 
     /// Exchange ACK for a new order: `PendingNew` -> `Open`.
-    pub fn ack_new(&mut self, order_id: u64) -> Result<(), &'static str> {
+    ///
+    /// Returns an `OrderReport` with status `Open` so the engine can deliver
+    /// it to the strategy, letting the strategy store the order_id for later
+    /// cancellation.
+    pub fn ack_new(&mut self, order_id: u64) -> Result<OrderReport, &'static str> {
         let o = self.orders.get_mut(&order_id).ok_or("unknown order_id")?;
         if o.state != OrderState::PendingNew {
             return Err("order is not PendingNew");
         }
         o.state = OrderState::Open;
-        Ok(())
+        Ok(OrderReport {
+            order_id: o.order.order_id,
+            symbol_id: o.order.symbol_id,
+            status: OrderState::Open,
+            last_fill_qty: 0,
+            last_fill_price: 0,
+            filled_qty: 0,
+            remaining_qty: o.remaining_qty,
+            reason: None,
+        })
     }
 
     /// Request cancel: `Open|PartiallyFilled` -> `PendingCancel`.
