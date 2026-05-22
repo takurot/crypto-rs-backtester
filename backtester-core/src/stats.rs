@@ -806,8 +806,9 @@ pub fn calculate_stats(trade_log: &TradeLog) -> BacktestStats {
     }
 
     let total_trades = inc.total_trades;
-    let win_rate = if total_trades > 0 {
-        inc.win_count as f64 / total_trades as f64
+    // win_rate is per closed round-trip, not per fill leg.
+    let win_rate = if inc.closed_trades > 0 {
+        inc.win_count as f64 / inc.closed_trades as f64
     } else {
         0.0
     };
@@ -845,8 +846,9 @@ pub fn calculate_stats(trade_log: &TradeLog) -> BacktestStats {
         0.0
     };
 
-    let avg_trade_pnl = if total_trades > 0 {
-        inc.total_pnl / total_trades as i64
+    // avg_trade_pnl is per closed round-trip.
+    let avg_trade_pnl = if inc.closed_trades > 0 {
+        inc.total_pnl / inc.closed_trades as i64
     } else {
         0
     };
@@ -915,8 +917,9 @@ mod tests {
         let curve = equity_curve_from_pnl_deltas(&all_pnl_deltas);
         let (max_dd_pct, max_dd_dur) = max_drawdown_pct_and_duration(&curve);
 
-        let win_rate = if total_trades > 0 {
-            win_count as f64 / total_trades as f64
+        // win_rate is per closed round-trip, consistent with calculate_stats.
+        let win_rate = if num_closed_trades > 0 {
+            win_count as f64 / num_closed_trades as f64
         } else {
             0.0
         };
@@ -939,8 +942,9 @@ mod tests {
             0.0
         };
 
-        let avg_trade_pnl = if total_trades > 0 {
-            total_pnl / total_trades as i64
+        // avg_trade_pnl is per closed round-trip, consistent with calculate_stats.
+        let avg_trade_pnl = if num_closed_trades > 0 {
+            total_pnl / num_closed_trades as i64
         } else {
             0
         };
@@ -1087,8 +1091,9 @@ mod tests {
         });
 
         let stats = calculate_stats(&log);
+        // total_trades counts fill legs; win_rate is per closed round-trip.
         assert_eq!(stats.total_trades, 2);
-        assert_eq!(stats.win_rate, 0.5);
+        assert_eq!(stats.win_rate, 1.0); // 1 winning round-trip / 1 closed round-trip
         assert!(stats.profit_factor.is_infinite());
     }
 
@@ -1140,8 +1145,9 @@ mod tests {
         log.push_pnl_delta(21, -5_00000000);
 
         let stats = calculate_stats(&log);
+        // total_trades = 4 fills; win_rate = 1 winning round-trip / 2 closed round-trips.
         assert_eq!(stats.total_trades, 4);
-        assert_eq!(stats.win_rate, 0.25);
+        assert_eq!(stats.win_rate, 0.5);
         assert_eq!(stats.profit_factor, 2.0);
     }
 

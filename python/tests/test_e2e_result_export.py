@@ -114,10 +114,9 @@ def test_e2e_summary_only_mode():
     stats = result.stats()
     assert stats["total_trades"] == 2  # 2 fills
     assert stats["total_pnl"] == 10_00000000
-    # Win rate calc: 1 win out of 2 fills (round trip logic vs fill logic)
-    # Fill 1: Open (PnL 0). Fill 2: Close (PnL +10). 
-    # Win count = 1. Total fills = 2. Win rate = 0.5.
-    assert stats["win_rate"] == 0.5
+    # win_rate is per closed round-trip (issue #55 fix).
+    # Fill 1: Open (PnL 0). Fill 2: Close (PnL +10) = 1 winning round-trip / 1 closed round-trip.
+    assert stats["win_rate"] == 1.0
 
 
 if __name__ == "__main__":
