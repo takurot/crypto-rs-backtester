@@ -274,6 +274,11 @@ impl Backtester {
                 "ring_buffer_size must be >= 1",
             ));
         }
+        if taker_fee_bps != 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "taker_fee_bps is not yet implemented (market orders are not supported). Use taker_fee_bps=0.",
+            ));
+        }
 
         // Parse and validate symbol_map if provided.
         let resolved_symbol_map = match symbol_map {
