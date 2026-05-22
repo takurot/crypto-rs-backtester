@@ -559,7 +559,9 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 if let Some(&symbol_id) = self.order_symbol_by_id.get(&order_id)
                     && let Ok(report) = self.exchange_mut(symbol_id).ack_new(order_id)
                 {
-                    let ts_delivery = self.now_ts_sim + self.config.order_update_latency_ns;
+                    let ts_delivery = self
+                        .now_ts_sim
+                        .saturating_add(self.config.order_update_latency_ns);
                     self.push_event(ts_delivery, EventKind::OrderReport(report));
                 }
             }

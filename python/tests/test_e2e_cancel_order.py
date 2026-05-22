@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import polars as pl
-import pytest
 import rust_backtester
 
 
@@ -53,19 +52,30 @@ class CancelOnSecondTickStrategy:
 
 
 def test_e2e_cancel_order_cancels_pending_order() -> None:
-    """Submit a buy limit order then cancel it; expect a Cancelled report."""
+    """Submit a buy limit order then cancel it; expect Open then Cancelled reports."""
     strat = CancelOnSecondTickStrategy()
-    bt = rust_backtester.Backtester(data={"BTC": make_ticks()}, feed_latency_ns=0, seed=42)
+    # symbol_map explicitly pins "BTC" to symbol_id=1 to make the test self-documenting.
+    bt = rust_backtester.Backtester(
+        data={"BTC": make_ticks()},
+        feed_latency_ns=0,
+        seed=42,
+        symbol_map={"BTC": 1},
+    )
     bt.run(strat)
 
     statuses = [r["status"] for r in strat.reports]
-    assert "Cancelled" in statuses, f"Expected Cancelled in {statuses}"
+    assert statuses == ["Open", "Cancelled"], f"Expected ['Open', 'Cancelled'], got {statuses}"
 
 
 def test_e2e_cancel_order_no_fill_after_cancel() -> None:
     """After cancellation the order must not fill on subsequent ticks."""
     strat = CancelOnSecondTickStrategy()
-    bt = rust_backtester.Backtester(data={"BTC": make_ticks()}, feed_latency_ns=0, seed=42)
+    bt = rust_backtester.Backtester(
+        data={"BTC": make_ticks()},
+        feed_latency_ns=0,
+        seed=42,
+        symbol_map={"BTC": 1},
+    )
     result = bt.run(strat)
 
     # No fills should be recorded because the order was cancelled before any fills.
