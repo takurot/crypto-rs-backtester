@@ -1262,7 +1262,11 @@ fn parse_polars_data(
 
             events.push((ts_ex, global_seq, EventKind::Tick(truth_tick)));
             global_seq += 1;
-            events.push((ts_local, global_seq, EventKind::TickDelivery(delivered_tick)));
+            events.push((
+                ts_local,
+                global_seq,
+                EventKind::TickDelivery(delivered_tick),
+            ));
             global_seq += 1;
         }
     }
