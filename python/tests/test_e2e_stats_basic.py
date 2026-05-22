@@ -68,3 +68,22 @@ def test_e2e_stats_basic_round_trip_pnl() -> None:
     assert stats["total_trades"] == 2
     assert stats["total_pnl"] == 1_00000000
 
+
+def test_e2e_stats_win_rate_per_round_trip() -> None:
+    """win_rate must count closed round-trips, not individual fill legs (issue #55)."""
+    lf = make_ticks()
+    bt = rust_backtester.Backtester(
+        data={"binance:BTC/USDT": lf},
+        seed=42,
+        python_mode="tick",
+        batch_ms=100,
+        feed_latency_ns=0,
+    )
+
+    result = bt.run(_RoundTripStrategy())
+    stats = result.stats()
+
+    # 2 fills = 1 winning round-trip → win_rate must be 1.0, not 0.5.
+    assert stats["total_trades"] == 2
+    assert stats["win_rate"] == 1.0
+
