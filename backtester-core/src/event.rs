@@ -16,6 +16,8 @@ pub enum EventKind {
     L2Update(L2Update),
     /// Strategy order request arriving at the exchange.
     Order(Order),
+    /// Market order arrives at the exchange after order-entry latency; fill immediately.
+    MarketOrderArrive(Order),
     /// Exchange ACK for a new order (PendingNew -> Open).
     OrderAck {
         order_id: u64,

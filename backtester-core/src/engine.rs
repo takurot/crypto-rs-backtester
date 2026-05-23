@@ -546,50 +546,15 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             EventKind::Order(order) => {
                 use crate::types::OrderType;
                 if order.order_type == OrderType::Market {
-                    // Market orders fill immediately at best bid/ask; fall back to last trade price.
-                    let taker_fee_bps = self.config.taker_fee_bps;
-                    let fallback = self
-                        .truth_last_trade_by_symbol
-                        .get(&order.symbol_id)
-                        .map(|t| t.price);
-                    let report = self
-                        .exchange_mut(order.symbol_id)
-                        .fill_market_order(order, fallback);
-                    match report {
-                        Ok(r) if r.status == crate::types::OrderState::Filled => {
-                            let fee =
-                                compute_fee(r.last_fill_price, r.last_fill_qty, taker_fee_bps);
-                            let trade_fill = TradeFill {
-                                ts_exchange: self.now_ts_sim,
-                                symbol_id: order.symbol_id,
-                                order_id: order.order_id,
-                                side: order.side,
-                                price: r.last_fill_price,
-                                qty: r.last_fill_qty,
-                                fee,
-                                is_taker: true,
-                            };
-                            self.trade_log.push_fill(trade_fill);
-                            let pnl_delta =
-                                self.account
-                                    .on_fill(&order, r.last_fill_qty, r.last_fill_price);
-                            let net_pnl = pnl_delta.saturating_sub(fee);
-                            self.trade_log.push_pnl_delta(self.now_ts_sim, net_pnl);
-                            let ts_delivery = self
-                                .now_ts_sim
-                                .saturating_add(self.config.order_update_latency_ns);
-                            self.push_event(ts_delivery, EventKind::OrderReport(r));
-                        }
-                        Ok(r) => {
-                            // Rejected (empty book): deliver reject report.
-                            let ts_delivery = self
-                                .now_ts_sim
-                                .saturating_add(self.config.order_update_latency_ns);
-                            self.push_event(ts_delivery, EventKind::OrderReport(r));
-                        }
-                        Err(_) => {} // Silently ignore invalid market orders (e.g., no-side)
-                    }
-                    // Market orders don't enter order_symbol_by_id because they never live in the book.
+                    // Apply order-entry latency before the market order reaches the exchange.
+                    // This mirrors the limit-order path (submit → OrderAck after latency).
+                    let dt = self
+                        .latency_model
+                        .sample_order_latency(self.now_ts_sim, &mut self.rng)
+                        .max(0);
+                    let ts_arrive = self.now_ts_sim.saturating_add(dt);
+                    // Market orders don't enter order_symbol_by_id — they never live in the book.
+                    self.push_event(ts_arrive, EventKind::MarketOrderArrive(order));
                 } else {
                     let order_id = order.order_id;
                     self.exchange_mut(order.symbol_id).submit_order(order);
@@ -631,6 +596,61 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 {
                     let ts_delivery = self.now_ts_sim + self.config.order_update_latency_ns;
                     self.push_event(ts_delivery, EventKind::OrderReport(report));
+                }
+            }
+            EventKind::MarketOrderArrive(order) => {
+                // Market order has arrived at the exchange — fill at best bid/ask or last trade.
+                let taker_fee_bps = self.config.taker_fee_bps;
+                let fallback = self
+                    .truth_last_trade_by_symbol
+                    .get(&order.symbol_id)
+                    .map(|t| t.price);
+                let report = self
+                    .exchange_mut(order.symbol_id)
+                    .fill_market_order(order, fallback);
+                let ts_delivery = self
+                    .now_ts_sim
+                    .saturating_add(self.config.order_update_latency_ns);
+                match report {
+                    Ok(r) if r.status == crate::types::OrderState::Filled => {
+                        let fee = compute_fee(r.last_fill_price, r.last_fill_qty, taker_fee_bps);
+                        let trade_fill = TradeFill {
+                            ts_exchange: self.now_ts_sim,
+                            symbol_id: order.symbol_id,
+                            order_id: order.order_id,
+                            side: order.side,
+                            price: r.last_fill_price,
+                            qty: r.last_fill_qty,
+                            fee,
+                            is_taker: true,
+                        };
+                        self.trade_log.push_fill(trade_fill);
+                        let pnl_delta =
+                            self.account
+                                .on_fill(&order, r.last_fill_qty, r.last_fill_price);
+                        let net_pnl = pnl_delta.saturating_sub(fee);
+                        self.trade_log.push_pnl_delta(self.now_ts_sim, net_pnl);
+                        self.push_event(ts_delivery, EventKind::OrderReport(r));
+                    }
+                    Ok(r) => {
+                        // Rejected (empty book) or invalid side: deliver reject report.
+                        self.push_event(ts_delivery, EventKind::OrderReport(r));
+                    }
+                    Err(_) => {
+                        // Malformed order (e.g., Side::None): deliver a Rejected report
+                        // so the strategy always receives a callback.
+                        let rejected = crate::types::OrderReport {
+                            order_id: order.order_id,
+                            symbol_id: order.symbol_id,
+                            status: crate::types::OrderState::Rejected,
+                            last_fill_qty: 0,
+                            last_fill_price: 0,
+                            filled_qty: 0,
+                            remaining_qty: order.qty,
+                            reason: Some("invalid market order"),
+                        };
+                        self.push_event(ts_delivery, EventKind::OrderReport(rejected));
+                    }
                 }
             }
             EventKind::OrderReport(report) => {
