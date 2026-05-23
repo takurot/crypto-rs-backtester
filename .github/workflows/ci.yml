@@ -41,8 +41,11 @@ jobs:
         run: cargo audit --deny warnings
 
   python:
-    name: Python E2E
+    name: Python E2E (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,7 +53,7 @@ jobs:
       - name: Install Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: "pip"
 
       - name: Install Rust
@@ -70,4 +73,3 @@ jobs:
         run: |
           . .venv/bin/activate
           pytest -m "not bench" python/tests
-
