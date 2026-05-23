@@ -71,3 +71,8 @@ jobs:
           . .venv/bin/activate
           pytest -m "not bench" python/tests
 
+      - name: mypy type check
+        run: |
+          . .venv/bin/activate
+          mypy python/rust_backtester/ --ignore-missing-imports
+

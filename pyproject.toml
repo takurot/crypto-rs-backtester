@@ -17,6 +17,8 @@ dev = [
     "maturin>=1.5,<2.0",
     "pytest>=8.0",
     "polars>=0.20",
+    "mypy>=1.8",
+    "pyarrow-stubs>=17.0",
 ]
 bench = [
     "pytest-benchmark>=4.0",
@@ -27,6 +29,13 @@ bindings = "pyo3"
 manifest-path = "backtester-py/Cargo.toml"
 python-source = "python"
 module-name = "rust_backtester._core"
+
+[tool.mypy]
+files = ["python/rust_backtester/"]
+ignore_missing_imports = true
+# Extension module stubs are in python/rust_backtester/_core.pyi
+# Strategy objects use structural subtyping — no Protocol enforcement yet.
+warn_unused_ignores = false
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
