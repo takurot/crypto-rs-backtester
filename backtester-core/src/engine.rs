@@ -611,13 +611,12 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                             .saturating_add(self.config.order_update_latency_ns);
                         self.push_event(ts_delivery, EventKind::OrderReport(report));
                         // Partial fills leave remaining qty dangling — cancel immediately.
-                        if report.status == OrderState::PartiallyFilled {
-                            if let Some(cancel_report) = self
+                        if report.status == OrderState::PartiallyFilled
+                            && let Some(cancel_report) = self
                                 .exchange_mut(symbol_id)
                                 .force_cancel_partial_fill(order_id)
-                            {
-                                self.push_event(ts_delivery, EventKind::OrderReport(cancel_report));
-                            }
+                        {
+                            self.push_event(ts_delivery, EventKind::OrderReport(cancel_report));
                         }
                     }
                 } else {
