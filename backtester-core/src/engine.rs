@@ -580,7 +580,9 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                         .exchange_mut(symbol_id)
                         .fill_market_immediately(order_id, fallback_price)
                     {
-                        if report.last_fill_qty > 0 && let Some(order) = maybe_order {
+                        if report.last_fill_qty > 0
+                            && let Some(order) = maybe_order
+                        {
                             let fee = compute_fee(
                                 report.last_fill_price,
                                 report.last_fill_qty,
@@ -1435,7 +1437,9 @@ mod tests {
         }
     }
 
-    fn make_market_engine(taker_fee_bps: i64) -> Engine<ConservativeQueue, MarketOrderStrategy, ConstantLatency> {
+    fn make_market_engine(
+        taker_fee_bps: i64,
+    ) -> Engine<ConservativeQueue, MarketOrderStrategy, ConstantLatency> {
         let config = EngineConfig {
             feed_latency_ns: 0,
             order_update_latency_ns: 0,
@@ -1447,7 +1451,10 @@ mod tests {
             ConservativeQueue,
             MarketOrderStrategy::default(),
             config,
-            ConstantLatency { feed_latency_ns: 0, order_latency_ns: 0 },
+            ConstantLatency {
+                feed_latency_ns: 0,
+                order_latency_ns: 0,
+            },
         )
     }
 
@@ -1479,7 +1486,11 @@ mod tests {
         eng.run().expect("engine run");
 
         let reports = &eng.strategy.reports;
-        assert_eq!(reports.len(), 1, "market order should produce exactly one report");
+        assert_eq!(
+            reports.len(),
+            1,
+            "market order should produce exactly one report"
+        );
         assert_eq!(reports[0].status, OrderState::Filled);
         assert_eq!(
             reports[0].last_fill_price, 105_00000000,
@@ -1515,7 +1526,11 @@ mod tests {
         eng.run().expect("engine run");
 
         let reports = &eng.strategy.reports;
-        assert_eq!(reports.len(), 2, "partial fill must produce PartiallyFilled + Cancelled");
+        assert_eq!(
+            reports.len(),
+            2,
+            "partial fill must produce PartiallyFilled + Cancelled"
+        );
         assert_eq!(reports[0].status, OrderState::PartiallyFilled);
         assert_eq!(reports[0].last_fill_qty, 3_00000000);
         assert_eq!(reports[0].remaining_qty, 7_00000000);
