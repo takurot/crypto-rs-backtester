@@ -111,6 +111,8 @@ impl OrderState {
                 | (PartiallyFilled, PartiallyFilled)
                 | (PartiallyFilled, Filled)
                 | (PartiallyFilled, PendingCancel)
+                // Market order partial fill: immediately cancel remaining qty
+                | (PartiallyFilled, Cancelled)
                 // Cancel-in-flight can still fill
                 | (PendingCancel, Cancelled)
                 | (PendingCancel, Filled)

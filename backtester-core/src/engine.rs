@@ -15,7 +15,9 @@ use crate::queue_model::QueueModel;
 use crate::rng::make_small_rng;
 use crate::stats::{BacktestStats, TradeFill, TradeLog, TradeLogMode, calculate_stats};
 use crate::tuner::BatchTuner;
-use crate::types::{FundingEvent, Order, OrderReport, OrderType, Tick, TsLocalNs, TsSimNs};
+use crate::types::{
+    FundingEvent, Order, OrderReport, OrderState, OrderType, Tick, TsLocalNs, TsSimNs,
+};
 use likely_stable::{likely, unlikely};
 use rand::rngs::SmallRng;
 
@@ -606,6 +608,15 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                             .now_ts_sim
                             .saturating_add(self.config.order_update_latency_ns);
                         self.push_event(ts_delivery, EventKind::OrderReport(report));
+                        // Partial fills leave remaining qty dangling — cancel immediately.
+                        if report.status == OrderState::PartiallyFilled {
+                            if let Some(cancel_report) = self
+                                .exchange_mut(symbol_id)
+                                .force_cancel_partial_fill(order_id)
+                            {
+                                self.push_event(ts_delivery, EventKind::OrderReport(cancel_report));
+                            }
+                        }
                     }
                 } else {
                     // Limit order: standard ACK → Open report.
@@ -1383,5 +1394,168 @@ mod tests {
             expected_net, 95_980_000,
             "expected net pnl after round trip"
         );
+    }
+
+    // ── Market order engine-level tests ─────────────────────────────────────
+
+    #[derive(Debug, Default)]
+    struct MarketOrderStrategy {
+        submitted: bool,
+        reports: Vec<OrderReport>,
+    }
+
+    impl Strategy for MarketOrderStrategy {
+        type Error = std::convert::Infallible;
+
+        fn on_tick(&mut self, tick: &Tick, ctx: &mut Context<'_>) -> Result<(), Self::Error> {
+            if self.submitted {
+                return Ok(());
+            }
+            self.submitted = true;
+            ctx.submit_order(Order {
+                order_id: 0,
+                ts_submit: ctx.ts_local(),
+                seq: 0,
+                symbol_id: tick.symbol_id,
+                side: Side::Buy,
+                order_type: OrderType::Market,
+                price: 0,
+                qty: tick.qty,
+            });
+            Ok(())
+        }
+
+        fn on_order_update(
+            &mut self,
+            report: &OrderReport,
+            _ctx: &mut Context<'_>,
+        ) -> Result<(), Self::Error> {
+            self.reports.push(*report);
+            Ok(())
+        }
+    }
+
+    fn make_market_engine(taker_fee_bps: i64) -> Engine<ConservativeQueue, MarketOrderStrategy, ConstantLatency> {
+        let config = EngineConfig {
+            feed_latency_ns: 0,
+            order_update_latency_ns: 0,
+            mode: EngineMode::Tick,
+            taker_fee_bps,
+            ..Default::default()
+        };
+        Engine::new(
+            ConservativeQueue,
+            MarketOrderStrategy::default(),
+            config,
+            ConstantLatency { feed_latency_ns: 0, order_latency_ns: 0 },
+        )
+    }
+
+    #[test]
+    fn test_market_order_fills_at_l2_ask_price_not_fallback() {
+        // Verify that fill_market_immediately uses the L2 best_ask, not the last trade price,
+        // when both are available. L2 ask=105; last trade=100.  Fill must be at 105.
+        let mut eng = make_market_engine(0);
+        let sid = fixtures::SYMBOL_ID_BTC_USDT;
+
+        // L2 update: ask side at price=105, qty=10
+        let l2 = fixtures::l2_update(500, 0, 105_00000000, 10_00000000, Side::Sell);
+        eng.push_event(500, EventKind::L2Update(l2));
+
+        // Trade tick at price=100 (this would be the fallback price)
+        let t0 = Tick {
+            ts_exchange: 1_000,
+            ts_local: 1_000,
+            seq: 0,
+            symbol_id: sid,
+            price: 100_00000000,
+            qty: 1_00000000,
+            side: Side::Buy,
+            flags: 0x01,
+        };
+        eng.push_event(1_000, EventKind::Tick(t0));
+        eng.push_event(1_000, EventKind::TickDelivery(t0));
+
+        eng.run().expect("engine run");
+
+        let reports = &eng.strategy.reports;
+        assert_eq!(reports.len(), 1, "market order should produce exactly one report");
+        assert_eq!(reports[0].status, OrderState::Filled);
+        assert_eq!(
+            reports[0].last_fill_price, 105_00000000,
+            "must fill at L2 ask price, not fallback"
+        );
+    }
+
+    #[test]
+    fn test_market_order_partial_fill_emits_cancelled_for_remaining_qty() {
+        // L2 ask has only 3 available; order wants 10 → PartiallyFilled + Cancelled reports.
+        let mut eng = make_market_engine(0);
+        let sid = fixtures::SYMBOL_ID_BTC_USDT;
+
+        // L2 ask: price=105, only 3 available
+        let l2 = fixtures::l2_update(500, 0, 105_00000000, 3_00000000, Side::Sell);
+        eng.push_event(500, EventKind::L2Update(l2));
+
+        let t0 = Tick {
+            ts_exchange: 1_000,
+            ts_local: 1_000,
+            seq: 0,
+            symbol_id: sid,
+            price: 105_00000000,
+            qty: 10_00000000,
+            side: Side::Buy,
+            flags: 0x01,
+        };
+        // Override qty to 10 for market order via the delivery event
+        // (strategy uses tick.qty as the order qty)
+        eng.push_event(1_000, EventKind::Tick(t0));
+        eng.push_event(1_000, EventKind::TickDelivery(t0));
+
+        eng.run().expect("engine run");
+
+        let reports = &eng.strategy.reports;
+        assert_eq!(reports.len(), 2, "partial fill must produce PartiallyFilled + Cancelled");
+        assert_eq!(reports[0].status, OrderState::PartiallyFilled);
+        assert_eq!(reports[0].last_fill_qty, 3_00000000);
+        assert_eq!(reports[0].remaining_qty, 7_00000000);
+        assert_eq!(reports[1].status, OrderState::Cancelled);
+        assert_eq!(reports[1].remaining_qty, 7_00000000);
+        assert!(
+            reports[1].reason.is_some(),
+            "cancelled report must carry a reason"
+        );
+    }
+
+    #[test]
+    fn test_market_order_taker_fee_applied() {
+        // Verify taker fee is deducted from PnL for market order fills.
+        // Buy 1 BTC at L2 ask=100 with 10 bps taker fee.
+        // fee = 100_00000000 * 1_00000000 * 10 / (1e8 * 10_000) = 10_000_000
+        let mut eng = make_market_engine(10);
+        let sid = fixtures::SYMBOL_ID_BTC_USDT;
+
+        let l2 = fixtures::l2_update(500, 0, 100_00000000, 1_00000000, Side::Sell);
+        eng.push_event(500, EventKind::L2Update(l2));
+
+        let t0 = Tick {
+            ts_exchange: 1_000,
+            ts_local: 1_000,
+            seq: 0,
+            symbol_id: sid,
+            price: 100_00000000,
+            qty: 1_00000000,
+            side: Side::Buy,
+            flags: 0x01,
+        };
+        eng.push_event(1_000, EventKind::Tick(t0));
+        eng.push_event(1_000, EventKind::TickDelivery(t0));
+
+        eng.run().expect("engine run");
+
+        let stats = crate::stats::calculate_stats(eng.trade_log());
+        let expected_fee = compute_fee(100_00000000, 1_00000000, 10);
+        assert_eq!(stats.total_fees_paid, expected_fee);
+        assert_eq!(stats.total_pnl, -expected_fee);
     }
 }

@@ -172,6 +172,7 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
         };
 
         // Use L2 best price when available; fall back to provided price when book is empty.
+        // i64::MAX as available_qty: fill the entire order with no depth constraint.
         let effective = best.or_else(|| fallback_price.map(|p| (p, i64::MAX)));
 
         if let Some((price, available_qty)) = effective {
@@ -208,6 +209,27 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
                 reason: Some("book empty"),
             })
         }
+    }
+
+    /// Cancel a partially-filled market order immediately after a partial fill.
+    ///
+    /// Transitions `PartiallyFilled → Cancelled` and returns a `Cancelled` report so the
+    /// engine can deliver it to the strategy.  Must only be called on an order in
+    /// `PartiallyFilled` state.  Returns `None` only if `order_id` is not found.
+    pub fn force_cancel_partial_fill(&mut self, order_id: u64) -> Option<OrderReport> {
+        let o = self.orders.get_mut(&order_id)?;
+        debug_assert_eq!(o.state, OrderState::PartiallyFilled);
+        o.state = OrderState::Cancelled;
+        Some(OrderReport {
+            order_id: o.order.order_id,
+            symbol_id: o.order.symbol_id,
+            status: OrderState::Cancelled,
+            last_fill_qty: 0,
+            last_fill_price: 0,
+            filled_qty: o.filled_qty,
+            remaining_qty: o.remaining_qty,
+            reason: Some("market order partial fill: remaining qty cancelled"),
+        })
     }
 
     /// Remove an order from the active set (typically called when terminal).

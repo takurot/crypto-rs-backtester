@@ -129,7 +129,7 @@ def test_market_order_invalid_order_type_raises() -> None:
                 symbol_id=1, side=1, price=0, qty=1_00000000, order_type="foo"
             )
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         _make_bt().run(BadOrderTypeStrategy())
 
 
