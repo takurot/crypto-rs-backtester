@@ -17,11 +17,16 @@ def test_init_pyi_stub_exists() -> None:
 
 
 def test_mypy_accepts_stub_annotated_strategy(tmp_path: Path) -> None:
-    """mypy must not report errors on a strategy typed against the stubs."""
+    """mypy must not report errors on a strategy annotated via TYPE_CHECKING."""
     strategy_src = """
-from rust_backtester import Backtester, BacktestResult
-from rust_backtester._core import Context, PyTick, PyOrderReport
+from __future__ import annotations
+from typing import TYPE_CHECKING
 import polars as pl
+from rust_backtester import Backtester, BacktestResult
+
+if TYPE_CHECKING:
+    from rust_backtester._core import Context, PyOrderReport, PyTick
+
 
 class MyStrategy:
     def on_tick(self, tick: PyTick, ctx: Context) -> None:
@@ -30,6 +35,7 @@ class MyStrategy:
     def on_order_update(self, report: PyOrderReport, ctx: Context) -> None:
         _ = report.order_id
         _ = report.status
+
 
 def run() -> BacktestResult:
     bt = Backtester(

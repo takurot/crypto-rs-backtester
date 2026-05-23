@@ -1,43 +1,71 @@
 """Type stubs for the _core Rust extension module."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, final
 
 __version__: str
 
+@final
 class PyTick:
-    """A single market trade/quote tick delivered to strategy callbacks."""
+    """A single market trade/quote tick delivered to strategy callbacks.
 
-    ts_exchange: int
-    ts_local: int
-    seq: int
-    symbol_id: int
-    price: int
-    qty: int
-    side: int
-    flags: int
+    All attributes are read-only (backed by ``#[pyo3(get)]``).
+    """
 
+    @property
+    def ts_exchange(self) -> int: ...
+    @property
+    def ts_local(self) -> int: ...
+    @property
+    def seq(self) -> int: ...
+    @property
+    def symbol_id(self) -> int: ...
+    @property
+    def price(self) -> int: ...
+    @property
+    def qty(self) -> int: ...
+    @property
+    def side(self) -> int: ...
+    @property
+    def flags(self) -> int: ...
     def __getitem__(self, key: str) -> Any: ...
     def __repr__(self) -> str: ...
 
+@final
 class PyOrderReport:
-    """Order lifecycle update (open, fill, cancel, reject) delivered to strategy callbacks."""
+    """Order lifecycle update (open, fill, cancel, reject) delivered to strategy callbacks.
 
-    order_id: int
-    symbol_id: int
-    status: str
-    last_fill_qty: int
-    last_fill_price: int
-    filled_qty: int
-    remaining_qty: int
-    reason: str | None
+    All attributes are read-only (backed by ``#[pyo3(get)]``).
+    """
 
+    @property
+    def order_id(self) -> int: ...
+    @property
+    def symbol_id(self) -> int: ...
+    @property
+    def status(self) -> str: ...
+    @property
+    def last_fill_qty(self) -> int: ...
+    @property
+    def last_fill_price(self) -> int: ...
+    @property
+    def filled_qty(self) -> int: ...
+    @property
+    def remaining_qty(self) -> int: ...
+    @property
+    def reason(self) -> str | None: ...
     def __getitem__(self, key: str) -> Any: ...
     def __repr__(self) -> str: ...
     def get(self, key: str, default: Any = ...) -> Any: ...
 
+@final
 class Context:
-    """Strategy execution context: submit/cancel orders and read current timestamp."""
+    """Strategy execution context passed to ``on_tick`` / ``on_order_update`` callbacks.
+
+    Note: this class is an internal engine type; it cannot be directly imported
+    at runtime. Use ``from __future__ import annotations`` or
+    ``TYPE_CHECKING`` guards when annotating strategy method parameters.
+    """
 
     def ts_local(self) -> int: ...
     def submit_order(
@@ -49,6 +77,7 @@ class Context:
     ) -> None: ...
     def cancel_order(self, order_id: int) -> None: ...
 
+@final
 class BacktestResult:
     """Result of a completed backtest run."""
 
@@ -57,6 +86,7 @@ class BacktestResult:
     def trades_df(self) -> dict[str, Any]: ...
     def equity_curve_df(self) -> dict[str, Any]: ...
 
+@final
 class Backtester:
     """Tick-level backtester backed by a Rust simulation engine."""
 
