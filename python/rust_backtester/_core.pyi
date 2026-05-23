@@ -74,6 +74,7 @@ class Context:
         side: int,
         price: int,
         qty: int,
+        order_type: str = "limit",
     ) -> None: ...
     def cancel_order(self, order_id: int) -> None: ...
 
