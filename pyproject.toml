@@ -17,6 +17,7 @@ dev = [
     "maturin>=1.5,<2.0",
     "pytest>=8.0",
     "polars>=0.20",
+    "mypy>=1.8",
 ]
 bench = [
     "pytest-benchmark>=4.0",
