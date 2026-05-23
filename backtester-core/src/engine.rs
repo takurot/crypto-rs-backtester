@@ -15,7 +15,7 @@ use crate::queue_model::QueueModel;
 use crate::rng::make_small_rng;
 use crate::stats::{BacktestStats, TradeFill, TradeLog, TradeLogMode, calculate_stats};
 use crate::tuner::BatchTuner;
-use crate::types::{FundingEvent, Order, OrderReport, Tick, TsLocalNs, TsSimNs};
+use crate::types::{FundingEvent, Order, OrderReport, OrderType, Tick, TsLocalNs, TsSimNs};
 use likely_stable::{likely, unlikely};
 use rand::rngs::SmallRng;
 
@@ -556,13 +556,65 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 self.push_event(ts_ack, EventKind::OrderAck { order_id });
             }
             EventKind::OrderAck { order_id } => {
-                if let Some(&symbol_id) = self.order_symbol_by_id.get(&order_id)
-                    && let Ok(report) = self.exchange_mut(symbol_id).ack_new(order_id)
-                {
-                    let ts_delivery = self
-                        .now_ts_sim
-                        .saturating_add(self.config.order_update_latency_ns);
-                    self.push_event(ts_delivery, EventKind::OrderReport(report));
+                let Some(&symbol_id) = self.order_symbol_by_id.get(&order_id) else {
+                    return Ok(Some(event));
+                };
+
+                let is_market = self
+                    .exchange_mut(symbol_id)
+                    .get_order(order_id)
+                    .map(|o| o.order_type == OrderType::Market)
+                    .unwrap_or(false);
+
+                if is_market {
+                    // Market order: fill immediately at best bid/ask, apply taker fee.
+                    // Fall back to the last known truth trade price when no L2 book data exists.
+                    let fallback_price = self
+                        .truth_last_trade_by_symbol
+                        .get(&symbol_id)
+                        .map(|t| t.price);
+                    let maybe_order = self.exchange_mut(symbol_id).get_order(order_id);
+                    if let Some(report) = self
+                        .exchange_mut(symbol_id)
+                        .fill_market_immediately(order_id, fallback_price)
+                    {
+                        if report.last_fill_qty > 0 && let Some(order) = maybe_order {
+                            let fee = compute_fee(
+                                report.last_fill_price,
+                                report.last_fill_qty,
+                                self.config.taker_fee_bps,
+                            );
+                            self.trade_log.push_fill(TradeFill {
+                                ts_exchange: self.now_ts_sim,
+                                symbol_id: report.symbol_id,
+                                order_id: report.order_id,
+                                side: order.side,
+                                price: report.last_fill_price,
+                                qty: report.last_fill_qty,
+                                fee,
+                                is_taker: true,
+                            });
+                            let pnl = self.account.on_fill(
+                                &order,
+                                report.last_fill_qty,
+                                report.last_fill_price,
+                            );
+                            self.trade_log
+                                .push_pnl_delta(self.now_ts_sim, pnl.saturating_sub(fee));
+                        }
+                        let ts_delivery = self
+                            .now_ts_sim
+                            .saturating_add(self.config.order_update_latency_ns);
+                        self.push_event(ts_delivery, EventKind::OrderReport(report));
+                    }
+                } else {
+                    // Limit order: standard ACK → Open report.
+                    if let Ok(report) = self.exchange_mut(symbol_id).ack_new(order_id) {
+                        let ts_delivery = self
+                            .now_ts_sim
+                            .saturating_add(self.config.order_update_latency_ns);
+                        self.push_event(ts_delivery, EventKind::OrderReport(report));
+                    }
                 }
             }
             EventKind::OrderCancel { order_id } => {

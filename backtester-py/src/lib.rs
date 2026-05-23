@@ -286,12 +286,6 @@ impl Backtester {
                 "ring_buffer_size must be >= 1",
             ));
         }
-        if taker_fee_bps != 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "taker_fee_bps is not yet implemented (market orders are not supported). Use taker_fee_bps=0.",
-            ));
-        }
-
         // Parse and validate symbol_map if provided.
         let resolved_symbol_map = match symbol_map {
             None => None,
@@ -853,6 +847,7 @@ enum PyCommand {
         price: i64,
         qty: i64,
         seq: u64,
+        order_type: OrderType,
     },
     CancelOrder {
         order_id: u64,
@@ -873,7 +868,24 @@ impl PyContext {
         self.ts_local
     }
 
-    pub fn submit_order(&mut self, symbol_id: u32, side: i8, price: i64, qty: i64) -> PyResult<()> {
+    #[pyo3(signature = (symbol_id, side, price, qty, order_type = "limit"))]
+    pub fn submit_order(
+        &mut self,
+        symbol_id: u32,
+        side: i8,
+        price: i64,
+        qty: i64,
+        order_type: &str,
+    ) -> PyResult<()> {
+        let ot = match order_type {
+            "limit" => OrderType::Limit,
+            "market" => OrderType::Market,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "invalid order_type {other:?}: expected \"limit\" or \"market\""
+                )));
+            }
+        };
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
         self.commands.push(PyCommand::SubmitOrder {
@@ -882,6 +894,7 @@ impl PyContext {
             price,
             qty,
             seq,
+            order_type: ot,
         });
         Ok(())
     }
@@ -1088,6 +1101,7 @@ fn apply_py_ctx_commands(
                 price,
                 qty,
                 seq,
+                order_type,
             } => {
                 let side = Side::try_from(side).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("invalid side: {e}"))
@@ -1098,7 +1112,7 @@ fn apply_py_ctx_commands(
                     seq,
                     symbol_id,
                     side,
-                    order_type: OrderType::Limit,
+                    order_type,
                     price,
                     qty,
                 });
