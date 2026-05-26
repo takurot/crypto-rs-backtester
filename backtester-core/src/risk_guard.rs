@@ -44,13 +44,13 @@ impl RiskGuard {
             return Some("risk: max_open_orders exceeded");
         }
         if self.max_position > 0 {
-            let delta = match order.side {
-                Side::Buy => order.qty,
-                Side::Sell => -order.qty,
+            let delta: i128 = match order.side {
+                Side::Buy => order.qty as i128,
+                Side::Sell => -(order.qty as i128),
                 Side::None => 0,
             };
-            let proposed = current_position_qty.saturating_add(delta);
-            if proposed.abs() > self.max_position {
+            let proposed = current_position_qty as i128 + delta;
+            if proposed.unsigned_abs() > self.max_position as u128 {
                 return Some("risk: max_position exceeded");
             }
         }
@@ -58,9 +58,12 @@ impl RiskGuard {
     }
 
     /// Update the running PnL and fire the kill switch if the threshold is breached.
+    ///
+    /// `max_loss` is only active when it is strictly negative; zero means disabled and positive
+    /// values are treated as disabled (checked at construction via `EngineConfig` validation).
     pub fn update_pnl(&mut self, delta: i64) {
         self.running_pnl = self.running_pnl.saturating_add(delta);
-        if !self.killed && self.max_loss != 0 && self.running_pnl <= self.max_loss {
+        if !self.killed && self.max_loss < 0 && self.running_pnl <= self.max_loss {
             self.killed = true;
         }
     }
@@ -138,5 +141,13 @@ mod tests {
         let mut g = RiskGuard::new(0, 0, 0);
         g.update_pnl(-1_000_000_000_000);
         assert!(!g.is_killed());
+    }
+
+    #[test]
+    fn test_positive_max_loss_never_triggers() {
+        // Positive max_loss is treated as disabled (guard is < 0 check).
+        let mut g = RiskGuard::new(0, 0, 1);
+        g.update_pnl(-100_00000000);
+        assert!(!g.is_killed(), "positive max_loss must not trigger");
     }
 }

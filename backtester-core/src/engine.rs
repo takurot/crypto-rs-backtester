@@ -699,6 +699,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                     ts_exchange: event.ts_exchange,
                     pnl,
                 });
+                self.risk_guard.update_pnl(pnl);
 
                 match self.config.mode {
                     EngineMode::Tick => {

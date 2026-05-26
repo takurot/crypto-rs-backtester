@@ -360,6 +360,11 @@ impl Backtester {
                 "unknown latency_model '{latency_model}'; expected 'constant' or 'log_normal'"
             )));
         }
+        if max_loss > 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "max_loss must be <= 0 (negative threshold) or 0 (disabled)",
+            ));
+        }
 
         Ok(Backtester {
             data,
