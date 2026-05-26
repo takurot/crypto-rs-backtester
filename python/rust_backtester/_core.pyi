@@ -109,6 +109,9 @@ class Backtester:
         latency_model: str = "constant",
         latency_mean_ns: int = 0,
         latency_std_ns: int = 0,
+        max_open_orders: int = 0,
+        max_position: int = 0,
+        max_loss: int = 0,
     ) -> None: ...
     def run(self, strategy: Any) -> BacktestResult: ...
     def run_many(self, strategies: list[Any]) -> list[BacktestResult]: ...

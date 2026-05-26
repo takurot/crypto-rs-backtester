@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use crate::account::Account;
 use crate::event::{Event, EventId, EventKind};
+use crate::risk_guard::RiskGuard;
 use crate::tick_source::{TickSource, TickSourceError};
 
 use crate::event_queue::EventQueue;
@@ -48,11 +49,14 @@ pub struct EngineConfig {
     /// Maker fee in basis points (1 bps = 0.01%). Applied to passive fills via QueueModel.
     /// E.g., `2` = 0.02% maker fee. Fixed-point safe: fee = notional * bps / 10_000.
     pub maker_fee_bps: i64,
-    /// Taker fee in basis points (1 bps = 0.01%). **Not yet applied.**
-    /// Reserved for aggressive/market-order fills (market orders are not yet implemented).
-    /// Setting a non-zero value has no effect on current backtests; it is stored for forward
-    /// compatibility so that configs remain stable once taker fills are introduced.
+    /// Taker fee in basis points (1 bps = 0.01%). Applied to market order fills.
     pub taker_fee_bps: i64,
+    /// Pre-trade limit: maximum simultaneous open orders (0 = unlimited).
+    pub max_open_orders: usize,
+    /// Pre-trade limit: absolute maximum position size in base units, fixed-point (0 = unlimited).
+    pub max_position: i64,
+    /// Kill-switch threshold: cumulative PnL floor, fixed-point, must be <= 0 (0 = disabled).
+    pub max_loss: i64,
 }
 
 impl Default for EngineConfig {
@@ -67,6 +71,9 @@ impl Default for EngineConfig {
             trade_log_mode: TradeLogMode::All,
             maker_fee_bps: 0,
             taker_fee_bps: 0,
+            max_open_orders: 0,
+            max_position: 0,
+            max_loss: 0,
         }
     }
 }
@@ -273,6 +280,8 @@ pub struct Engine<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> {
 
     // Auto-tuner (Phase 7.8.1)
     tuner: BatchTuner,
+
+    risk_guard: RiskGuard,
 }
 
 impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
@@ -281,6 +290,8 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
     }
 
     pub fn new(queue_model: Q, strategy: S, config: EngineConfig, latency_model: L) -> Self {
+        let risk_guard =
+            RiskGuard::new(config.max_open_orders, config.max_position, config.max_loss);
         Self {
             config,
             queue: EventQueue::new(),
@@ -318,6 +329,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 config.max_batch_ns, // initial value: use config value
                 500.0,               // target latency per tick: 500ns
             ),
+            risk_guard,
         }
     }
 
@@ -343,7 +355,9 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
     }
 
     pub fn stats(&self) -> BacktestStats {
-        calculate_stats(&self.trade_log)
+        let mut s = calculate_stats(&self.trade_log);
+        s.killed = self.risk_guard.is_killed();
+        s
     }
 
     fn exchange_mut(&mut self, symbol_id: u32) -> &mut ExchangeSimulator<Q> {
@@ -506,6 +520,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                     // Subtract fee from PnL so net PnL reflects all trading costs.
                     let net_pnl = pnl_delta.saturating_sub(tf.fee);
                     self.trade_log.push_pnl_delta(tick.ts_exchange, net_pnl);
+                    self.risk_guard.update_pnl(net_pnl);
                 }
 
                 let ts_delivery = tick.ts_exchange + self.config.order_update_latency_ns;
@@ -603,8 +618,9 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                                 report.last_fill_qty,
                                 report.last_fill_price,
                             );
-                            self.trade_log
-                                .push_pnl_delta(self.now_ts_sim, pnl.saturating_sub(fee));
+                            let net_pnl = pnl.saturating_sub(fee);
+                            self.trade_log.push_pnl_delta(self.now_ts_sim, net_pnl);
+                            self.risk_guard.update_pnl(net_pnl);
                         }
                         let ts_delivery = self
                             .now_ts_sim
@@ -684,6 +700,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                     ts_exchange: event.ts_exchange,
                     pnl,
                 });
+                self.risk_guard.update_pnl(pnl);
 
                 match self.config.mode {
                     EngineMode::Tick => {
@@ -734,13 +751,35 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
         for c in commands {
             match c {
                 Command::SubmitOrder(mut order) => {
-                    // Default: schedule the order to arrive at the exchange immediately at `ts_local`.
-                    // `order_id` is assigned by the exchange simulator.
                     order.ts_submit = ts_local;
-                    // Engine-assigned, globally unique order_id for deterministic routing.
                     let order_id = self.next_order_id;
                     self.next_order_id = self.next_order_id.wrapping_add(1);
                     order.order_id = order_id;
+
+                    let open_count = self.order_symbol_by_id.len();
+                    let position_qty = self.account.position_qty(order.symbol_id);
+                    if let Some(reason) =
+                        self.risk_guard
+                            .check_order(&order, open_count, position_qty)
+                    {
+                        let ts_delivery =
+                            ts_local.saturating_add(self.config.order_update_latency_ns);
+                        self.push_event(
+                            ts_delivery,
+                            EventKind::OrderReport(OrderReport {
+                                order_id,
+                                symbol_id: order.symbol_id,
+                                status: OrderState::Rejected,
+                                last_fill_qty: 0,
+                                last_fill_price: 0,
+                                filled_qty: 0,
+                                remaining_qty: order.qty,
+                                reason: Some(reason),
+                            }),
+                        );
+                        continue;
+                    }
+
                     self.order_symbol_by_id.insert(order_id, order.symbol_id);
                     self.push_event(ts_local, EventKind::Order(order));
                 }

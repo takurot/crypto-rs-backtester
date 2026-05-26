@@ -165,6 +165,12 @@ pub struct Backtester {
     latency_mean_ns: i64,
     /// Std-dev for log-normal feed/order latency (ns). Only used when `latency_model="log_normal"`.
     latency_std_ns: i64,
+    /// Pre-trade limit: maximum simultaneous open orders (0 = unlimited).
+    max_open_orders: usize,
+    /// Pre-trade limit: absolute maximum position in base units, fixed-point (0 = unlimited).
+    max_position: i64,
+    /// Kill-switch PnL floor, fixed-point, must be <= 0 to have effect (0 = disabled).
+    max_loss: i64,
 }
 
 #[pyclass]
@@ -284,7 +290,7 @@ impl BacktestResult {
 #[pymethods]
 impl Backtester {
     #[new]
-    #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=None, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all", maker_fee_bps=0, taker_fee_bps=0, ring_buffer_size=10000, symbol_map=None, queue_model="conservative", latency_model="constant", latency_mean_ns=0, latency_std_ns=0))]
+    #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=None, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all", maker_fee_bps=0, taker_fee_bps=0, ring_buffer_size=10000, symbol_map=None, queue_model="conservative", latency_model="constant", latency_mean_ns=0, latency_std_ns=0, max_open_orders=0, max_position=0, max_loss=0))]
     #[allow(clippy::too_many_arguments)] // Python API intentionally exposes many keyword arguments
     pub fn new(
         py: Python<'_>,
@@ -303,6 +309,9 @@ impl Backtester {
         latency_model: &str,
         latency_mean_ns: i64,
         latency_std_ns: i64,
+        max_open_orders: usize,
+        max_position: i64,
+        max_loss: i64,
     ) -> PyResult<Self> {
         if ring_buffer_size == 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -374,6 +383,11 @@ impl Backtester {
                 "unknown latency_model '{latency_model}'; expected 'constant' or 'log_normal'"
             )));
         }
+        if max_loss > 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "max_loss must be <= 0 (negative threshold) or 0 (disabled)",
+            ));
+        }
 
         Ok(Backtester {
             data,
@@ -391,6 +405,9 @@ impl Backtester {
             latency_model: latency_model.to_string(),
             latency_mean_ns,
             latency_std_ns,
+            max_open_orders,
+            max_position,
+            max_loss,
         })
     }
 
@@ -431,6 +448,9 @@ impl Backtester {
             },
             maker_fee_bps: self.maker_fee_bps,
             taker_fee_bps: self.taker_fee_bps,
+            max_open_orders: self.max_open_orders,
+            max_position: self.max_position,
+            max_loss: self.max_loss,
         };
 
         let strat = PyStrategy { obj: strategy };
@@ -506,6 +526,9 @@ impl Backtester {
 
         let maker_fee_bps = self.maker_fee_bps;
         let taker_fee_bps = self.taker_fee_bps;
+        let max_open_orders = self.max_open_orders;
+        let max_position = self.max_position;
+        let max_loss = self.max_loss;
         let configs: Vec<EngineConfig> = (0..n)
             .map(|i| {
                 EngineConfig {
@@ -530,6 +553,9 @@ impl Backtester {
                     },
                     maker_fee_bps,
                     taker_fee_bps,
+                    max_open_orders,
+                    max_position,
+                    max_loss,
                 }
             })
             .collect();
@@ -609,6 +635,9 @@ impl Backtester {
             },
             maker_fee_bps: self.maker_fee_bps,
             taker_fee_bps: self.taker_fee_bps,
+            max_open_orders: self.max_open_orders,
+            max_position: self.max_position,
+            max_loss: self.max_loss,
         };
 
         let strat = PyStrategy { obj: strategy };
@@ -1192,6 +1221,7 @@ fn backtest_stats_to_pydict<'py>(
     d.set_item("avg_trade_pnl", s.avg_trade_pnl)?;
     d.set_item("avg_holding_period", s.avg_holding_period)?;
     d.set_item("total_fees_paid", s.total_fees_paid)?;
+    d.set_item("killed", s.killed)?;
     Ok(d)
 }
 
