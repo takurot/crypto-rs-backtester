@@ -17,14 +17,19 @@ from ._core import (
     call_strategy_on_ticks as call_strategy_on_ticks,
 )
 
+SCALE: int
+
 def to_fixed(val: float) -> int: ...
 def from_fixed(val: int) -> float: ...
+def to_float(val: int) -> float: ...
 
 __all__ = [
     "Backtester",
     "BacktestResult",
+    "SCALE",
     "__version__",
     "call_strategy_on_ticks",
     "to_fixed",
     "from_fixed",
+    "to_float",
 ]
