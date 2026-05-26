@@ -2,7 +2,7 @@ import math
 
 from ._core import BacktestResult, Backtester, __version__, call_strategy_on_ticks
 
-_SCALE: int = 100_000_000  # 1e8 fixed-point scale
+SCALE: int = 100_000_000  # 1e8 fixed-point scale
 _I64_MIN: int = -(1 << 63)
 _I64_MAX: int = (1 << 63) - 1
 
@@ -18,7 +18,7 @@ def to_fixed(val: float) -> int:
     """
     if not math.isfinite(val):
         raise ValueError(f"to_fixed requires a finite value, got {val!r}")
-    scaled = val * _SCALE
+    scaled = val * SCALE
     result = (
         math.floor(abs(scaled) + 0.5) if scaled >= 0 else -math.floor(-scaled + 0.5)
     )
@@ -33,14 +33,24 @@ def from_fixed(val: int) -> float:
     This function is intended for I/O boundaries only — never use float
     arithmetic inside the simulation core.
     """
-    return val / _SCALE
+    return val / SCALE
+
+
+def to_float(val: int) -> float:
+    """Convert a fixed-point int (1e8 scale) to float.
+
+    Alias for ``from_fixed``.  Intended for display/I/O only.
+    """
+    return val / SCALE
 
 
 __all__ = [
     "BacktestResult",
     "Backtester",
+    "SCALE",
     "__version__",
     "call_strategy_on_ticks",
     "to_fixed",
     "from_fixed",
+    "to_float",
 ]

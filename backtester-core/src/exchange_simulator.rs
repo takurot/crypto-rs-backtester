@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use crate::orderbook_l2::OrderBookL2;
 use crate::queue_model::QueueModel;
-use crate::types::{L2Update, Order, OrderReport, OrderState, Side, Tick};
+use crate::types::{L2Update, Order, OrderReport, OrderState, OrderType, Side, Tick};
 
 #[derive(Debug, Clone)]
 struct LiveOrder<S> {
@@ -145,6 +145,91 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
 
     pub fn get_remaining_qty(&self, order_id: u64) -> Option<i64> {
         self.orders.get(&order_id).map(|o| o.remaining_qty)
+    }
+
+    /// Immediately fill a market order at the current best bid/ask.
+    ///
+    /// Must be called on a `PendingNew` market order.  Returns `Some(report)` where
+    /// `report.status` is `Filled`, `PartiallyFilled`, or `Rejected`.
+    /// Returns `None` only if `order_id` is not found.
+    ///
+    /// `fallback_price`: used when the L2 book has no relevant side.  When provided,
+    /// the order fills at that price for its full requested qty (no depth constraint).
+    /// When `None` and the book is empty, the order is `Rejected`.
+    pub fn fill_market_immediately(
+        &mut self,
+        order_id: u64,
+        fallback_price: Option<i64>,
+    ) -> Option<OrderReport> {
+        let o = self.orders.get_mut(&order_id)?;
+        debug_assert_eq!(o.order.order_type, OrderType::Market);
+        debug_assert_eq!(o.state, OrderState::PendingNew);
+
+        let best = match o.order.side {
+            Side::Buy => self.book.best_ask(),
+            Side::Sell => self.book.best_bid(),
+            Side::None => None,
+        };
+
+        // Use L2 best price when available; fall back to provided price when book is empty.
+        // i64::MAX as available_qty: fill the entire order with no depth constraint.
+        let effective = best.or_else(|| fallback_price.map(|p| (p, i64::MAX)));
+
+        if let Some((price, available_qty)) = effective {
+            let fill_qty = o.order.qty.min(available_qty);
+            o.filled_qty = fill_qty;
+            o.remaining_qty = o.order.qty - fill_qty;
+            let status = if o.remaining_qty == 0 {
+                o.state = OrderState::Filled;
+                OrderState::Filled
+            } else {
+                o.state = OrderState::PartiallyFilled;
+                OrderState::PartiallyFilled
+            };
+            Some(OrderReport {
+                order_id: o.order.order_id,
+                symbol_id: o.order.symbol_id,
+                status,
+                last_fill_qty: fill_qty,
+                last_fill_price: price,
+                filled_qty: o.filled_qty,
+                remaining_qty: o.remaining_qty,
+                reason: None,
+            })
+        } else {
+            o.state = OrderState::Rejected;
+            Some(OrderReport {
+                order_id: o.order.order_id,
+                symbol_id: o.order.symbol_id,
+                status: OrderState::Rejected,
+                last_fill_qty: 0,
+                last_fill_price: 0,
+                filled_qty: 0,
+                remaining_qty: o.order.qty,
+                reason: Some("book empty"),
+            })
+        }
+    }
+
+    /// Cancel a partially-filled market order immediately after a partial fill.
+    ///
+    /// Transitions `PartiallyFilled → Cancelled` and returns a `Cancelled` report so the
+    /// engine can deliver it to the strategy.  Must only be called on an order in
+    /// `PartiallyFilled` state.  Returns `None` only if `order_id` is not found.
+    pub fn force_cancel_partial_fill(&mut self, order_id: u64) -> Option<OrderReport> {
+        let o = self.orders.get_mut(&order_id)?;
+        debug_assert_eq!(o.state, OrderState::PartiallyFilled);
+        o.state = OrderState::Cancelled;
+        Some(OrderReport {
+            order_id: o.order.order_id,
+            symbol_id: o.order.symbol_id,
+            status: OrderState::Cancelled,
+            last_fill_qty: 0,
+            last_fill_price: 0,
+            filled_qty: o.filled_qty,
+            remaining_qty: o.remaining_qty,
+            reason: Some("market order partial fill: remaining qty cancelled"),
+        })
     }
 
     /// Remove an order from the active set (typically called when terminal).
@@ -400,5 +485,106 @@ mod tests {
             "cancel rejected: already filled"
         );
         assert_eq!(ex.get_order_state(id), Some(OrderState::Filled));
+    }
+
+    // ── Market order tests ───────────────────────────────────────────────────
+
+    fn market_buy(symbol_id: u32, qty: i64) -> Order {
+        Order {
+            order_id: 1,
+            ts_submit: 1_000,
+            seq: 0,
+            symbol_id,
+            side: Side::Buy,
+            order_type: OrderType::Market,
+            price: 0,
+            qty,
+        }
+    }
+
+    fn market_sell(symbol_id: u32, qty: i64) -> Order {
+        Order {
+            order_id: 2,
+            ts_submit: 1_000,
+            seq: 0,
+            symbol_id,
+            side: Side::Sell,
+            order_type: OrderType::Market,
+            price: 0,
+            qty,
+        }
+    }
+
+    #[test]
+    fn test_market_buy_fills_at_best_ask() {
+        let mut ex = ExchangeSimulator::new(NoopQueue);
+        ex.apply_l2_update(&fixtures::l2_update(1_000, 0, 105, 10, Side::Sell));
+
+        let order = market_buy(fixtures::SYMBOL_ID_BTC_USDT, 5);
+        let id = ex.submit_order(order);
+
+        let report = ex
+            .fill_market_immediately(id, None)
+            .expect("fill_market_immediately should succeed");
+
+        assert_eq!(report.status, OrderState::Filled);
+        assert_eq!(report.last_fill_price, 105);
+        assert_eq!(report.last_fill_qty, 5);
+        assert_eq!(report.filled_qty, 5);
+        assert_eq!(report.remaining_qty, 0);
+    }
+
+    #[test]
+    fn test_market_sell_fills_at_best_bid() {
+        let mut ex = ExchangeSimulator::new(NoopQueue);
+        ex.apply_l2_update(&fixtures::l2_update(1_000, 0, 100, 8, Side::Buy));
+
+        let order = market_sell(fixtures::SYMBOL_ID_BTC_USDT, 3);
+        let id = ex.submit_order(order);
+
+        let report = ex
+            .fill_market_immediately(id, None)
+            .expect("fill_market_immediately should succeed");
+
+        assert_eq!(report.status, OrderState::Filled);
+        assert_eq!(report.last_fill_price, 100);
+        assert_eq!(report.last_fill_qty, 3);
+        assert_eq!(report.remaining_qty, 0);
+    }
+
+    #[test]
+    fn test_market_buy_partial_fill_when_book_depth_insufficient() {
+        let mut ex = ExchangeSimulator::new(NoopQueue);
+        // Only 3 available at best ask; order wants 10
+        ex.apply_l2_update(&fixtures::l2_update(1_000, 0, 105, 3, Side::Sell));
+
+        let order = market_buy(fixtures::SYMBOL_ID_BTC_USDT, 10);
+        let id = ex.submit_order(order);
+
+        let report = ex
+            .fill_market_immediately(id, None)
+            .expect("fill_market_immediately should succeed");
+
+        assert_eq!(report.status, OrderState::PartiallyFilled);
+        assert_eq!(report.last_fill_qty, 3);
+        assert_eq!(report.filled_qty, 3);
+        assert_eq!(report.remaining_qty, 7);
+    }
+
+    #[test]
+    fn test_market_order_rejected_when_book_empty() {
+        let mut ex = ExchangeSimulator::new(NoopQueue);
+        // No asks in book
+
+        let order = market_buy(fixtures::SYMBOL_ID_BTC_USDT, 1);
+        let id = ex.submit_order(order);
+
+        let report = ex
+            .fill_market_immediately(id, None)
+            .expect("fill_market_immediately should succeed");
+
+        assert_eq!(report.status, OrderState::Rejected);
+        assert_eq!(report.last_fill_qty, 0);
+        assert!(report.reason.is_some());
     }
 }

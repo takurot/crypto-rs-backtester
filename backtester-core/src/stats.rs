@@ -373,6 +373,8 @@ pub struct BacktestStats {
     pub avg_trade_pnl: i64,
     pub avg_holding_period: i64,
     pub total_fees_paid: i64,
+    /// True if the kill switch (max_loss) was triggered during the session.
+    pub killed: bool,
 }
 
 impl Default for BacktestStats {
@@ -390,6 +392,7 @@ impl Default for BacktestStats {
             avg_trade_pnl: 0,
             avg_holding_period: 0,
             total_fees_paid: 0,
+            killed: false,
         }
     }
 }
@@ -866,6 +869,7 @@ pub fn calculate_stats(trade_log: &TradeLog) -> BacktestStats {
         avg_trade_pnl,
         avg_holding_period: inc.avg_holding_period(),
         total_fees_paid: inc.total_fees_paid,
+        killed: false,
     }
 }
 
@@ -968,6 +972,7 @@ mod tests {
             avg_trade_pnl,
             avg_holding_period,
             total_fees_paid: 0,
+            killed: false,
         }
     }
 

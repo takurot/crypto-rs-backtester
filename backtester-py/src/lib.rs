@@ -165,6 +165,12 @@ pub struct Backtester {
     latency_mean_ns: i64,
     /// Std-dev for log-normal feed/order latency (ns). Only used when `latency_model="log_normal"`.
     latency_std_ns: i64,
+    /// Pre-trade limit: maximum simultaneous open orders (0 = unlimited).
+    max_open_orders: usize,
+    /// Pre-trade limit: absolute maximum position in base units, fixed-point (0 = unlimited).
+    max_position: i64,
+    /// Kill-switch PnL floor, fixed-point, must be <= 0 to have effect (0 = disabled).
+    max_loss: i64,
 }
 
 #[pyclass]
@@ -235,6 +241,29 @@ impl BacktestResult {
         Ok(d)
     }
 
+    /// Return stats with monetary fields converted to `f64` (divided by 1e8 scale).
+    ///
+    /// Useful for display: `total_pnl`, `avg_trade_pnl`, and `total_fees_paid` are
+    /// converted from fixed-point i64 to floats. All other fields are unchanged.
+    pub fn stats_human<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let scale = 100_000_000_f64;
+        let s = &self.stats;
+        let d = PyDict::new(py);
+        d.set_item("total_trades", s.total_trades)?;
+        d.set_item("win_rate", s.win_rate)?;
+        d.set_item("profit_factor", s.profit_factor)?;
+        d.set_item("sharpe_ratio", s.sharpe_ratio)?;
+        d.set_item("sortino_ratio", s.sortino_ratio)?;
+        d.set_item("max_drawdown", s.max_drawdown)?;
+        d.set_item("max_drawdown_duration", s.max_drawdown_duration)?;
+        d.set_item("calmar_ratio", s.calmar_ratio)?;
+        d.set_item("total_pnl", s.total_pnl as f64 / scale)?;
+        d.set_item("avg_trade_pnl", s.avg_trade_pnl as f64 / scale)?;
+        d.set_item("avg_holding_period", s.avg_holding_period)?;
+        d.set_item("total_fees_paid", s.total_fees_paid as f64 / scale)?;
+        Ok(d)
+    }
+
     /// Return equity curve as a PyArrow-compatible dict of arrays for zero-copy access.
     /// Schema: ts_exchange (i64), equity (i64)
     pub fn equity_curve_df<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
@@ -261,7 +290,7 @@ impl BacktestResult {
 #[pymethods]
 impl Backtester {
     #[new]
-    #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=None, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all", maker_fee_bps=0, taker_fee_bps=0, ring_buffer_size=10000, symbol_map=None, queue_model="conservative", latency_model="constant", latency_mean_ns=0, latency_std_ns=0))]
+    #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=None, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all", maker_fee_bps=0, taker_fee_bps=0, ring_buffer_size=10000, symbol_map=None, queue_model="conservative", latency_model="constant", latency_mean_ns=0, latency_std_ns=0, max_open_orders=0, max_position=0, max_loss=0))]
     #[allow(clippy::too_many_arguments)] // Python API intentionally exposes many keyword arguments
     pub fn new(
         py: Python<'_>,
@@ -280,18 +309,15 @@ impl Backtester {
         latency_model: &str,
         latency_mean_ns: i64,
         latency_std_ns: i64,
+        max_open_orders: usize,
+        max_position: i64,
+        max_loss: i64,
     ) -> PyResult<Self> {
         if ring_buffer_size == 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "ring_buffer_size must be >= 1",
             ));
         }
-        if taker_fee_bps != 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "taker_fee_bps is not yet implemented (market orders are not supported). Use taker_fee_bps=0.",
-            ));
-        }
-
         // Parse and validate symbol_map if provided.
         let resolved_symbol_map = match symbol_map {
             None => None,
@@ -357,6 +383,11 @@ impl Backtester {
                 "unknown latency_model '{latency_model}'; expected 'constant' or 'log_normal'"
             )));
         }
+        if max_loss > 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "max_loss must be <= 0 (negative threshold) or 0 (disabled)",
+            ));
+        }
 
         Ok(Backtester {
             data,
@@ -374,6 +405,9 @@ impl Backtester {
             latency_model: latency_model.to_string(),
             latency_mean_ns,
             latency_std_ns,
+            max_open_orders,
+            max_position,
+            max_loss,
         })
     }
 
@@ -414,6 +448,9 @@ impl Backtester {
             },
             maker_fee_bps: self.maker_fee_bps,
             taker_fee_bps: self.taker_fee_bps,
+            max_open_orders: self.max_open_orders,
+            max_position: self.max_position,
+            max_loss: self.max_loss,
         };
 
         let strat = PyStrategy { obj: strategy };
@@ -489,6 +526,9 @@ impl Backtester {
 
         let maker_fee_bps = self.maker_fee_bps;
         let taker_fee_bps = self.taker_fee_bps;
+        let max_open_orders = self.max_open_orders;
+        let max_position = self.max_position;
+        let max_loss = self.max_loss;
         let configs: Vec<EngineConfig> = (0..n)
             .map(|i| {
                 EngineConfig {
@@ -513,6 +553,9 @@ impl Backtester {
                     },
                     maker_fee_bps,
                     taker_fee_bps,
+                    max_open_orders,
+                    max_position,
+                    max_loss,
                 }
             })
             .collect();
@@ -592,6 +635,9 @@ impl Backtester {
             },
             maker_fee_bps: self.maker_fee_bps,
             taker_fee_bps: self.taker_fee_bps,
+            max_open_orders: self.max_open_orders,
+            max_position: self.max_position,
+            max_loss: self.max_loss,
         };
 
         let strat = PyStrategy { obj: strategy };
@@ -853,6 +899,7 @@ enum PyCommand {
         price: i64,
         qty: i64,
         seq: u64,
+        order_type: OrderType,
     },
     CancelOrder {
         order_id: u64,
@@ -873,7 +920,24 @@ impl PyContext {
         self.ts_local
     }
 
-    pub fn submit_order(&mut self, symbol_id: u32, side: i8, price: i64, qty: i64) -> PyResult<()> {
+    #[pyo3(signature = (symbol_id, side, price, qty, order_type = "limit"))]
+    pub fn submit_order(
+        &mut self,
+        symbol_id: u32,
+        side: i8,
+        price: i64,
+        qty: i64,
+        order_type: &str,
+    ) -> PyResult<()> {
+        let ot = match order_type {
+            "limit" => OrderType::Limit,
+            "market" => OrderType::Market,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "invalid order_type {other:?}: expected \"limit\" or \"market\""
+                )));
+            }
+        };
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
         self.commands.push(PyCommand::SubmitOrder {
@@ -882,6 +946,7 @@ impl PyContext {
             price,
             qty,
             seq,
+            order_type: ot,
         });
         Ok(())
     }
@@ -1088,6 +1153,7 @@ fn apply_py_ctx_commands(
                 price,
                 qty,
                 seq,
+                order_type,
             } => {
                 let side = Side::try_from(side).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("invalid side: {e}"))
@@ -1098,7 +1164,7 @@ fn apply_py_ctx_commands(
                     seq,
                     symbol_id,
                     side,
-                    order_type: OrderType::Limit,
+                    order_type,
                     price,
                     qty,
                 });
@@ -1155,6 +1221,7 @@ fn backtest_stats_to_pydict<'py>(
     d.set_item("avg_trade_pnl", s.avg_trade_pnl)?;
     d.set_item("avg_holding_period", s.avg_holding_period)?;
     d.set_item("total_fees_paid", s.total_fees_paid)?;
+    d.set_item("killed", s.killed)?;
     Ok(d)
 }
 

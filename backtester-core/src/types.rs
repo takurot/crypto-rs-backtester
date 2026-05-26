@@ -70,6 +70,8 @@ impl TryFrom<i8> for Side {
 #[repr(u8)]
 pub enum OrderType {
     Limit = 0,
+    /// Fills immediately at best bid/ask; always taker.
+    Market = 1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -99,6 +101,9 @@ impl OrderState {
                 // ACK/reject
                 | (PendingNew, Open)
                 | (PendingNew, Rejected)
+                // Market order: immediate fill without Open
+                | (PendingNew, Filled)
+                | (PendingNew, PartiallyFilled)
                 // Normal lifecycle
                 | (Open, PartiallyFilled)
                 | (Open, Filled)
@@ -106,6 +111,8 @@ impl OrderState {
                 | (PartiallyFilled, PartiallyFilled)
                 | (PartiallyFilled, Filled)
                 | (PartiallyFilled, PendingCancel)
+                // Market order partial fill: immediately cancel remaining qty
+                | (PartiallyFilled, Cancelled)
                 // Cancel-in-flight can still fill
                 | (PendingCancel, Cancelled)
                 | (PendingCancel, Filled)
