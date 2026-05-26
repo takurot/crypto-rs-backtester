@@ -2,6 +2,7 @@
 name = "backtester-core"
 version = "0.1.1"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 rand = { version = "0.8", features = ["small_rng"] }

@@ -40,6 +40,14 @@ jobs:
       - name: cargo audit
         run: cargo audit --deny warnings
 
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19
+
+      - name: cargo deny check
+        run: cargo deny check
+
   python:
     name: Python E2E (${{ matrix.python-version }})
     runs-on: ubuntu-latest
