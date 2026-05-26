@@ -87,7 +87,7 @@ def test_to_float_roundtrip_with_to_fixed() -> None:
 
 
 class _BuyAndHoldStrategy:
-    """Submits one buy order and waits."""
+    """Submits one buy order and waits (position never closed → zero PnL)."""
 
     def __init__(self) -> None:
         self._submitted = False
@@ -99,6 +99,29 @@ class _BuyAndHoldStrategy:
 
     def on_order_update(self, _report, _ctx) -> None:  # noqa: ANN001
         pass
+
+
+class _RoundTripStrategy:
+    """Buy at tick 1, sell at tick 3 to generate non-zero realized PnL."""
+
+    def __init__(self) -> None:
+        self._buys = 0
+        self._sells = 0
+        self._fill_count = 0
+
+    def on_tick(self, tick, ctx) -> None:  # noqa: ANN001
+        # tick prices: 100, 101, 99, 100
+        if self._buys == 0 and tick.price == 100_00000000:
+            ctx.submit_order(tick.symbol_id, 1, tick.price, 1_00000000)
+            self._buys += 1
+
+    def on_order_update(self, report, ctx) -> None:  # noqa: ANN001
+        if report.status == "Open":
+            return
+        if report.status in ("PartiallyFilled", "Filled") and self._fill_count == 0:
+            self._fill_count += 1
+            # Immediately submit a sell at the same price to generate a round-trip.
+            ctx.submit_order(report.symbol_id, -1, report.last_fill_price, 1_00000000)
 
 
 def test_stats_human_exists() -> None:
@@ -125,22 +148,36 @@ def test_stats_human_monetary_fields_are_float() -> None:
         assert isinstance(human[field], float), f"{field} should be float"
 
 
+def test_stats_human_all_keys_present() -> None:
+    """stats_human() must expose exactly the same keys as stats()."""
+    bt = rust_backtester.Backtester(data={"sym": make_minimal_ticks()}, seed=42)
+    result = bt.run(_BuyAndHoldStrategy())
+    assert result.stats_human().keys() == result.stats().keys()
+
+
 def test_stats_human_non_monetary_fields_preserved() -> None:
     bt = rust_backtester.Backtester(data={"sym": make_minimal_ticks()}, seed=42)
     result = bt.run(_BuyAndHoldStrategy())
     human = result.stats_human()
     raw = result.stats()
 
-    # Non-monetary fields should match raw stats exactly.
-    for field in ("total_trades", "win_rate", "sharpe_ratio", "sortino_ratio",
-                  "max_drawdown", "calmar_ratio", "profit_factor"):
-        assert human[field] == raw[field], f"field {field} differs"
+    # All non-monetary fields (including max_drawdown_duration, avg_holding_period)
+    # should be identical between stats() and stats_human().
+    monetary = {"total_pnl", "avg_trade_pnl", "total_fees_paid"}
+    for field, raw_val in raw.items():
+        if field not in monetary:
+            assert human[field] == raw_val, f"non-monetary field {field!r} differs"
 
 
 def test_stats_human_monetary_values_match_scale() -> None:
-    """stats_human monetary values == stats raw / SCALE."""
-    bt = rust_backtester.Backtester(data={"sym": make_minimal_ticks()}, seed=42)
-    result = bt.run(_BuyAndHoldStrategy())
+    """stats_human monetary values == stats raw / SCALE, verified with non-zero values."""
+    # Use _RoundTripStrategy to ensure non-zero monetary fields in stats.
+    bt = rust_backtester.Backtester(
+        data={"sym": make_minimal_ticks()},
+        seed=42,
+        maker_fee_bps=10,  # 1 bp fee so total_fees_paid > 0
+    )
+    result = bt.run(_RoundTripStrategy())
     human = result.stats_human()
     raw = result.stats()
 
@@ -148,3 +185,5 @@ def test_stats_human_monetary_values_match_scale() -> None:
     for field in ("total_pnl", "avg_trade_pnl", "total_fees_paid"):
         expected = raw[field] / scale
         assert human[field] == pytest.approx(expected, rel=1e-9), f"{field} mismatch"
+        # Verify at least one monetary field is non-zero (to catch wrong-divisor bugs).
+    assert raw["total_fees_paid"] != 0, "expected non-zero fees to exercise conversion"
