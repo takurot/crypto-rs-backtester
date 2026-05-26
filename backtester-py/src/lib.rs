@@ -235,6 +235,29 @@ impl BacktestResult {
         Ok(d)
     }
 
+    /// Return stats with monetary fields converted to `f64` (divided by 1e8 scale).
+    ///
+    /// Useful for display: `total_pnl`, `avg_trade_pnl`, and `total_fees_paid` are
+    /// converted from fixed-point i64 to floats. All other fields are unchanged.
+    pub fn stats_human<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let scale = 100_000_000_f64;
+        let s = &self.stats;
+        let d = PyDict::new(py);
+        d.set_item("total_trades", s.total_trades)?;
+        d.set_item("win_rate", s.win_rate)?;
+        d.set_item("profit_factor", s.profit_factor)?;
+        d.set_item("sharpe_ratio", s.sharpe_ratio)?;
+        d.set_item("sortino_ratio", s.sortino_ratio)?;
+        d.set_item("max_drawdown", s.max_drawdown)?;
+        d.set_item("max_drawdown_duration", s.max_drawdown_duration)?;
+        d.set_item("calmar_ratio", s.calmar_ratio)?;
+        d.set_item("total_pnl", s.total_pnl as f64 / scale)?;
+        d.set_item("avg_trade_pnl", s.avg_trade_pnl as f64 / scale)?;
+        d.set_item("avg_holding_period", s.avg_holding_period)?;
+        d.set_item("total_fees_paid", s.total_fees_paid as f64 / scale)?;
+        Ok(d)
+    }
+
     /// Return equity curve as a PyArrow-compatible dict of arrays for zero-copy access.
     /// Schema: ts_exchange (i64), equity (i64)
     pub fn equity_curve_df<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
