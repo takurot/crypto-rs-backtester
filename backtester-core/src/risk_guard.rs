@@ -100,25 +100,40 @@ mod tests {
     #[test]
     fn test_check_order_passes_when_no_limits() {
         let g = RiskGuard::default();
-        assert!(g.check_order(&make_order(Side::Buy, 1_00000000), 100, 0).is_none());
+        assert!(
+            g.check_order(&make_order(Side::Buy, 1_00000000), 100, 0)
+                .is_none()
+        );
     }
 
     #[test]
     fn test_max_open_orders_rejects_at_limit() {
         let g = RiskGuard::new(2, 0, 0);
         // 1 open order — OK
-        assert!(g.check_order(&make_order(Side::Buy, 1_00000000), 1, 0).is_none());
+        assert!(
+            g.check_order(&make_order(Side::Buy, 1_00000000), 1, 0)
+                .is_none()
+        );
         // 2 open orders — reject
-        assert!(g.check_order(&make_order(Side::Buy, 1_00000000), 2, 0).is_some());
+        assert!(
+            g.check_order(&make_order(Side::Buy, 1_00000000), 2, 0)
+                .is_some()
+        );
     }
 
     #[test]
     fn test_max_position_rejects_when_exceeded() {
         let g = RiskGuard::new(0, 1_00000000, 0);
         // Buy 2 units with flat position → proposed=2 > 1 → reject
-        assert!(g.check_order(&make_order(Side::Buy, 2_00000000), 0, 0).is_some());
+        assert!(
+            g.check_order(&make_order(Side::Buy, 2_00000000), 0, 0)
+                .is_some()
+        );
         // Buy 1 unit with flat position → proposed=1 == 1 → OK
-        assert!(g.check_order(&make_order(Side::Buy, 1_00000000), 0, 0).is_none());
+        assert!(
+            g.check_order(&make_order(Side::Buy, 1_00000000), 0, 0)
+                .is_none()
+        );
     }
 
     #[test]
@@ -133,7 +148,10 @@ mod tests {
     fn test_killed_rejects_all_orders() {
         let mut g = RiskGuard::new(0, 0, -1);
         g.update_pnl(-100_00000000);
-        assert!(g.check_order(&make_order(Side::Buy, 1_00000000), 0, 0).is_some());
+        assert!(
+            g.check_order(&make_order(Side::Buy, 1_00000000), 0, 0)
+                .is_some()
+        );
     }
 
     #[test]

@@ -290,7 +290,8 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
     }
 
     pub fn new(queue_model: Q, strategy: S, config: EngineConfig, latency_model: L) -> Self {
-        let risk_guard = RiskGuard::new(config.max_open_orders, config.max_position, config.max_loss);
+        let risk_guard =
+            RiskGuard::new(config.max_open_orders, config.max_position, config.max_loss);
         Self {
             config,
             queue: EventQueue::new(),
@@ -757,8 +758,12 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
 
                     let open_count = self.order_symbol_by_id.len();
                     let position_qty = self.account.position_qty(order.symbol_id);
-                    if let Some(reason) = self.risk_guard.check_order(&order, open_count, position_qty) {
-                        let ts_delivery = ts_local.saturating_add(self.config.order_update_latency_ns);
+                    if let Some(reason) =
+                        self.risk_guard
+                            .check_order(&order, open_count, position_qty)
+                    {
+                        let ts_delivery =
+                            ts_local.saturating_add(self.config.order_update_latency_ns);
                         self.push_event(
                             ts_delivery,
                             EventKind::OrderReport(OrderReport {
