@@ -8,6 +8,7 @@ pub mod io;
 pub mod latency_model;
 pub mod orderbook_l2;
 pub mod queue_model;
+pub mod risk_guard;
 pub mod rng;
 pub mod stats;
 pub mod sweep;
