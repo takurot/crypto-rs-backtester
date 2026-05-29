@@ -18,6 +18,7 @@ struct CachedL3Batch {
     price: Int64Array,
     qty: Int64Array,
     side: Int8Array,
+    seq: Option<UInt64Array>,
     order_id: UInt64Array,
     action: Int8Array,
     num_rows: usize,
@@ -31,6 +32,7 @@ impl CachedL3Batch {
             price: get_required_i64(&batch, &["price"])?,
             qty: get_required_i64(&batch, &["qty", "size"])?,
             side: integer_array_to_i8(required_column(&batch, &["side"])?, "side")?,
+            seq: optional_u64(&batch, "seq")?,
             order_id: get_required_u64(&batch, &["order_id"])?,
             action: integer_array_to_i8(required_column(&batch, &["action"])?, "action")?,
             num_rows,
@@ -100,6 +102,11 @@ where
 
         Ok(L3Update {
             ts_exchange: batch.ts_exchange.value(idx),
+            seq: batch
+                .seq
+                .as_ref()
+                .map(|seq| seq.value(idx))
+                .unwrap_or(idx as u64),
             symbol_id: self.symbol_id,
             order_id: batch.order_id.value(idx),
             price: batch.price.value(idx),
@@ -150,6 +157,13 @@ fn get_required_i64(batch: &RecordBatch, names: &[&str]) -> Result<Int64Array, T
 
 fn get_required_u64(batch: &RecordBatch, names: &[&str]) -> Result<UInt64Array, TickSourceError> {
     integer_array_to_u64(required_column(batch, names)?, names[0])
+}
+
+fn optional_u64(batch: &RecordBatch, name: &str) -> Result<Option<UInt64Array>, TickSourceError> {
+    batch
+        .column_by_name(name)
+        .map(|column| integer_array_to_u64(column.as_ref(), name))
+        .transpose()
 }
 
 fn integer_array_to_i64(column: &dyn Array, name: &str) -> Result<Int64Array, TickSourceError> {

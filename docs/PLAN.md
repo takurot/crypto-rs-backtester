@@ -273,7 +273,10 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
         - `l3_exact_queue_matches_manual_calculation_and_beats_conservative`
         - `engine_routes_l3_updates_to_l3_exact_queue_model`
         - `engine_rejects_mixed_l2_and_l3_depth_for_same_symbol`
+        - `l3_delete_after_submit_advances_active_queue_state`
+        - `l3_and_tick_sources_at_same_timestamp_follow_feed_seq_order`
         - `arrow_l3_source_reads_required_order_id_and_action_columns`
+        - `arrow_l3_source_uses_row_order_seq_when_seq_column_is_absent`
         - `test_e2e_l3_exact_fill_uses_l3_queue_position`
         - `test_e2e_l3_exact_fill_works_with_run_arrow_dict_stream`
 

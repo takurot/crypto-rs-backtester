@@ -75,16 +75,23 @@ impl OrderBookL3 {
     }
 
     pub fn qty_ahead(&self, side: Side, price: i64, order_id: u64) -> i64 {
+        self.orders_ahead(side, price, order_id)
+            .into_iter()
+            .map(|(_, qty)| qty)
+            .sum()
+    }
+
+    pub fn orders_ahead(&self, side: Side, price: i64, order_id: u64) -> Vec<(u64, i64)> {
         let Some(queue) = self.side_map(side).and_then(|levels| levels.get(&price)) else {
-            return 0;
+            return Vec::new();
         };
 
-        let mut ahead = 0_i64;
+        let mut ahead = Vec::new();
         for (id, qty) in queue {
             if *id == order_id {
                 return ahead;
             }
-            ahead = ahead.saturating_add(*qty);
+            ahead.push((*id, *qty));
         }
 
         // Simulated user orders are not present in the venue L3 feed; the exact
@@ -130,5 +137,9 @@ impl MarketDepth for OrderBookL3 {
 
     fn qty_ahead(&self, side: Side, price: i64, order_id: u64) -> i64 {
         OrderBookL3::qty_ahead(self, side, price, order_id)
+    }
+
+    fn orders_ahead(&self, side: Side, price: i64, order_id: u64) -> Vec<(u64, i64)> {
+        OrderBookL3::orders_ahead(self, side, price, order_id)
     }
 }

@@ -12,6 +12,11 @@ pub trait MarketDepth: Send {
     /// L2 books do not know individual order IDs, so they conservatively return
     /// the full level quantity.
     fn qty_ahead(&self, side: Side, price: i64, order_id: u64) -> i64;
+
+    /// Ordered venue orders ahead at a price level. L2 books do not expose this.
+    fn orders_ahead(&self, _side: Side, _price: i64, _order_id: u64) -> Vec<(u64, i64)> {
+        Vec::new()
+    }
 }
 
 /// Minimal L2 order book (price level) representation.

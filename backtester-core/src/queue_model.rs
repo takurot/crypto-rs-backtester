@@ -1,11 +1,11 @@
 use crate::orderbook_l2::MarketDepth;
-use crate::types::{Order, Side, Tick};
+use crate::types::{L3Update, Order, Side, Tick};
 
 /// Queue model for simulating passive fill probability / queue position.
 ///
 /// Phase 1 scope: a deterministic conservative model driven by market trade ticks.
 pub trait QueueModel {
-    type State: Clone + Copy + core::fmt::Debug + PartialEq + Eq;
+    type State: Clone + core::fmt::Debug + PartialEq + Eq;
 
     fn register_order(&mut self, order: &Order, book: &dyn MarketDepth) -> Self::State;
 
@@ -16,6 +16,8 @@ pub trait QueueModel {
         trade: &Tick,
         state: &mut Self::State,
     ) -> i64;
+
+    fn on_l3_update(&mut self, _order: &Order, _state: &mut Self::State, _update: &L3Update) {}
 }
 
 /// Queue model that never fills (useful for tests that only care about state transitions).
@@ -174,12 +176,20 @@ impl QueueModel for VolumeClockQueue {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct L3ExactQueue;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct L3ExactQueueState {
+    pub qty_ahead: i64,
+    ahead_orders: Vec<(u64, i64)>,
+}
+
 impl QueueModel for L3ExactQueue {
-    type State = ConservativeQueueState;
+    type State = L3ExactQueueState;
 
     fn register_order(&mut self, order: &Order, book: &dyn MarketDepth) -> Self::State {
+        let ahead_orders = book.orders_ahead(order.side, order.price, order.order_id);
         Self::State {
-            qty_ahead: book.qty_ahead(order.side, order.price, order.order_id),
+            qty_ahead: ahead_orders.iter().map(|(_, qty)| *qty).sum(),
+            ahead_orders,
         }
     }
 
@@ -190,8 +200,92 @@ impl QueueModel for L3ExactQueue {
         trade: &Tick,
         state: &mut Self::State,
     ) -> i64 {
-        let mut conservative = ConservativeQueue;
-        conservative.check_fill(order, remaining_qty, trade, state)
+        if remaining_qty <= 0 {
+            return 0;
+        }
+        if trade.symbol_id != order.symbol_id {
+            return 0;
+        }
+        if trade.price != order.price {
+            return 0;
+        }
+        if trade.qty <= 0 {
+            return 0;
+        }
+
+        let is_against = matches!(
+            (order.side, trade.side),
+            (Side::Buy, Side::Sell) | (Side::Sell, Side::Buy)
+        );
+        if !is_against {
+            return 0;
+        }
+
+        let mut available = trade.qty;
+        if state.qty_ahead > 0 {
+            let consumed = state.qty_ahead.min(available);
+            state.qty_ahead -= consumed;
+            consume_ahead_orders(&mut state.ahead_orders, consumed);
+            available -= consumed;
+        }
+
+        available.min(remaining_qty)
+    }
+
+    fn on_l3_update(&mut self, order: &Order, state: &mut Self::State, update: &L3Update) {
+        use crate::orderbook_l3::{L3_DELETE, L3_MODIFY};
+
+        if update.symbol_id != order.symbol_id
+            || update.side != order.side
+            || update.price != order.price
+        {
+            return;
+        }
+
+        match update.action {
+            L3_DELETE => remove_ahead_order(state, update.order_id),
+            L3_MODIFY => modify_ahead_order(state, update.order_id, update.qty.max(0)),
+            _ => {}
+        }
+    }
+}
+
+fn consume_ahead_orders(ahead_orders: &mut Vec<(u64, i64)>, mut qty: i64) {
+    while qty > 0 && !ahead_orders.is_empty() {
+        let consumed = ahead_orders[0].1.min(qty);
+        ahead_orders[0].1 -= consumed;
+        qty -= consumed;
+        if ahead_orders[0].1 == 0 {
+            ahead_orders.remove(0);
+        }
+    }
+}
+
+fn remove_ahead_order(state: &mut L3ExactQueueState, order_id: u64) {
+    let Some(pos) = state
+        .ahead_orders
+        .iter()
+        .position(|(id, _)| *id == order_id)
+    else {
+        return;
+    };
+    let (_, qty) = state.ahead_orders.remove(pos);
+    state.qty_ahead = state.qty_ahead.saturating_sub(qty);
+}
+
+fn modify_ahead_order(state: &mut L3ExactQueueState, order_id: u64, new_qty: i64) {
+    let Some((_, qty)) = state
+        .ahead_orders
+        .iter_mut()
+        .find(|(id, _)| *id == order_id)
+    else {
+        return;
+    };
+    state.qty_ahead = state.qty_ahead.saturating_sub(*qty);
+    *qty = new_qty;
+    state.qty_ahead = state.qty_ahead.saturating_add(new_qty);
+    if new_qty == 0 {
+        state.ahead_orders.retain(|(_, qty)| *qty > 0);
     }
 }
 

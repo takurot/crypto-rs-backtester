@@ -59,6 +59,16 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
     }
 
     pub fn apply_l3_update(&mut self, update: &L3Update) -> Result<(), &'static str> {
+        for live in self.orders.values_mut() {
+            if matches!(
+                live.state,
+                OrderState::PendingNew | OrderState::Open | OrderState::PartiallyFilled
+            ) {
+                self.queue_model
+                    .on_l3_update(&live.order, &mut live.queue_state, update);
+            }
+        }
+
         let Some(book_l3) = &mut self.book_l3 else {
             return Err("exchange is not in L3 depth mode");
         };

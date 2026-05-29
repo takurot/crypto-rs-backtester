@@ -22,6 +22,45 @@ fn arrow_l3_source_reads_required_order_id_and_action_columns() {
         Field::new("price", DataType::Int64, false),
         Field::new("qty", DataType::Int64, false),
         Field::new("side", DataType::Int8, false),
+        Field::new("seq", DataType::UInt64, false),
+        Field::new("order_id", DataType::UInt64, false),
+        Field::new("action", DataType::Int8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(vec![1_000, 2_000])),
+            Arc::new(Int64Array::from(vec![100, 100])),
+            Arc::new(Int64Array::from(vec![5, 0])),
+            Arc::new(Int8Array::from(vec![1, 1])),
+            Arc::new(UInt64Array::from(vec![7, 9])),
+            Arc::new(UInt64Array::from(vec![20, 20])),
+            Arc::new(Int8Array::from(vec![L3_ADD as i8, L3_DELETE as i8])),
+        ],
+    )
+    .expect("batch");
+
+    let mut source = ArrowL3Source::try_new(7, reader(batch)).expect("source");
+    let first = source.next().expect("next").expect("first update");
+    assert_eq!(first.symbol_id, 7);
+    assert_eq!(first.seq, 7);
+    assert_eq!(first.order_id, 20);
+    assert_eq!(first.side, Side::Buy);
+    assert_eq!(first.action, L3_ADD);
+
+    let second = source.next().expect("next").expect("second update");
+    assert_eq!(second.seq, 9);
+    assert_eq!(second.action, L3_DELETE);
+    assert!(source.next().expect("next").is_none());
+}
+
+#[test]
+fn arrow_l3_source_uses_row_order_seq_when_seq_column_is_absent() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("ts_exchange", DataType::Int64, false),
+        Field::new("price", DataType::Int64, false),
+        Field::new("qty", DataType::Int64, false),
+        Field::new("side", DataType::Int8, false),
         Field::new("order_id", DataType::UInt64, false),
         Field::new("action", DataType::Int8, false),
     ]));
@@ -39,15 +78,8 @@ fn arrow_l3_source_reads_required_order_id_and_action_columns() {
     .expect("batch");
 
     let mut source = ArrowL3Source::try_new(7, reader(batch)).expect("source");
-    let first = source.next().expect("next").expect("first update");
-    assert_eq!(first.symbol_id, 7);
-    assert_eq!(first.order_id, 20);
-    assert_eq!(first.side, Side::Buy);
-    assert_eq!(first.action, L3_ADD);
-
-    let second = source.next().expect("next").expect("second update");
-    assert_eq!(second.action, L3_DELETE);
-    assert!(source.next().expect("next").is_none());
+    assert_eq!(source.next().expect("next").expect("first").seq, 0);
+    assert_eq!(source.next().expect("next").expect("second").seq, 1);
 }
 
 #[test]

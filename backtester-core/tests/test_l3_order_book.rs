@@ -7,6 +7,7 @@ const SYMBOL_ID: u32 = 1;
 fn l3_update(order_id: u64, price: i64, qty: i64, side: Side, action: u8) -> L3Update {
     L3Update {
         ts_exchange: 0,
+        seq: 0,
         symbol_id: SYMBOL_ID,
         order_id,
         price,

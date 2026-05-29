@@ -179,6 +179,7 @@ pub struct L2Update {
 #[repr(C)]
 pub struct L3Update {
     pub ts_exchange: TsExchangeNs,
+    pub seq: u64,
     pub symbol_id: u32,
     pub order_id: u64,
     pub price: i64,

@@ -224,6 +224,7 @@ impl<'a> Context<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PeekedEvent {
     ts: i64,
+    seq: u64,
     source_idx: usize,
 }
 
@@ -233,6 +234,7 @@ impl Ord for PeekedEvent {
         other
             .ts
             .cmp(&self.ts)
+            .then_with(|| other.seq.cmp(&self.seq))
             .then_with(|| other.source_idx.cmp(&self.source_idx))
     }
 }
@@ -445,6 +447,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                     if let Some(tick) = source.peek()? {
                         self.source_heap.push(PeekedEvent {
                             ts: tick.ts_exchange,
+                            seq: tick.seq,
                             source_idx: i,
                         });
                     }
@@ -457,6 +460,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                     if let Some(update) = source.peek()? {
                         self.l3_source_heap.push(PeekedEvent {
                             ts: update.ts_exchange,
+                            seq: update.seq,
                             source_idx: i,
                         });
                     }
@@ -467,12 +471,12 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             let next_queue_ts = self.queue.peek().map(|e| e.ts_sim()).unwrap_or(i64::MAX);
 
             if let Some(pe) = self.l3_source_heap.peek().copied() {
-                let next_tick_ts = self
+                let l3_is_next_source = self
                     .source_heap
                     .peek()
-                    .map(|tick| tick.ts)
-                    .unwrap_or(i64::MAX);
-                if likely(pe.ts <= next_queue_ts && pe.ts <= next_tick_ts) {
+                    .map(|tick| (pe.ts, pe.seq) <= (tick.ts, tick.seq))
+                    .unwrap_or(true);
+                if likely(pe.ts <= next_queue_ts && l3_is_next_source) {
                     let idx = pe.source_idx;
                     self.l3_source_heap.pop();
 
@@ -487,6 +491,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                     if let Some(next) = self.l3_sources[idx].peek()? {
                         self.l3_source_heap.push(PeekedEvent {
                             ts: next.ts_exchange,
+                            seq: next.seq,
                             source_idx: idx,
                         });
                     }
@@ -529,6 +534,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 if let Some(next) = self.sources[idx].peek()? {
                     self.source_heap.push(PeekedEvent {
                         ts: next.ts_exchange,
+                        seq: next.seq,
                         source_idx: idx,
                     });
                 }
