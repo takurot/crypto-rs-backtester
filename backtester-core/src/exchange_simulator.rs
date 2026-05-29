@@ -3,9 +3,10 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
 
-use crate::orderbook_l2::OrderBookL2;
+use crate::orderbook_l2::{MarketDepth, OrderBookL2};
+use crate::orderbook_l3::OrderBookL3;
 use crate::queue_model::QueueModel;
-use crate::types::{L2Update, Order, OrderReport, OrderState, OrderType, Side, Tick};
+use crate::types::{L2Update, L3Update, Order, OrderReport, OrderState, OrderType, Side, Tick};
 
 #[derive(Debug, Clone)]
 struct LiveOrder<S> {
@@ -25,6 +26,7 @@ struct LiveOrder<S> {
 #[derive(Debug)]
 pub struct ExchangeSimulator<Q: QueueModel> {
     book: OrderBookL2,
+    book_l3: Option<OrderBookL3>,
     queue_model: Q,
     orders: BTreeMap<u64, LiveOrder<Q::State>>,
     /// Optimization: Index active orders by (price, side) to avoid scanning all orders on every trade.
@@ -35,6 +37,17 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
     pub fn new(queue_model: Q) -> Self {
         Self {
             book: OrderBookL2::new(),
+            book_l3: None,
+            queue_model,
+            orders: BTreeMap::new(),
+            buckets: FxHashMap::default(),
+        }
+    }
+
+    pub fn new_l3(queue_model: Q) -> Self {
+        Self {
+            book: OrderBookL2::new(),
+            book_l3: Some(OrderBookL3::new()),
             queue_model,
             orders: BTreeMap::new(),
             buckets: FxHashMap::default(),
@@ -45,6 +58,13 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
         self.book.apply_l2(update);
     }
 
+    pub fn apply_l3_update(&mut self, update: &L3Update) -> Result<(), &'static str> {
+        let Some(book_l3) = &mut self.book_l3 else {
+            return Err("exchange is not in L3 depth mode");
+        };
+        book_l3.apply_l3(update)
+    }
+
     /// Submit an order to the exchange.
     ///
     /// Returns the generated order_id and transitions the order to `PendingNew`.
@@ -52,7 +72,13 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
         let order_id = order.order_id;
         debug_assert!(order_id != 0, "order_id must be assigned by the engine");
 
-        let queue_state = self.queue_model.register_order(&order, &self.book);
+        let queue_state = if let Some(book_l3) = &self.book_l3 {
+            self.queue_model
+                .register_order(&order, book_l3 as &dyn MarketDepth)
+        } else {
+            self.queue_model
+                .register_order(&order, &self.book as &dyn MarketDepth)
+        };
 
         self.buckets
             .entry((order.price, order.side))

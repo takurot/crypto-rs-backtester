@@ -2,6 +2,18 @@ use std::collections::BTreeMap;
 
 use crate::types::{L2Update, Side};
 
+/// Unified read interface for L2 and L3 depth snapshots.
+pub trait MarketDepth: Send {
+    /// Total resting quantity at a price level.
+    fn level_qty(&self, side: Side, price: i64) -> i64;
+
+    /// Quantity ahead of a specific order at a price level.
+    ///
+    /// L2 books do not know individual order IDs, so they conservatively return
+    /// the full level quantity.
+    fn qty_ahead(&self, side: Side, price: i64, order_id: u64) -> i64;
+}
+
 /// Minimal L2 order book (price level) representation.
 ///
 /// Scaffolding for benches; production semantics will expand in later phases.
@@ -44,6 +56,16 @@ impl OrderBookL2 {
 
     pub fn best_ask(&self) -> Option<(i64, i64)> {
         self.asks.iter().next().map(|(p, q)| (*p, *q))
+    }
+}
+
+impl MarketDepth for OrderBookL2 {
+    fn level_qty(&self, side: Side, price: i64) -> i64 {
+        OrderBookL2::level_qty(self, side, price)
+    }
+
+    fn qty_ahead(&self, side: Side, price: i64, _order_id: u64) -> i64 {
+        OrderBookL2::level_qty(self, side, price)
     }
 }
 

@@ -15,8 +15,9 @@ use arrow::pyarrow::ToPyArrow;
 use arrow::record_batch::RecordBatch;
 use arrow_utils::get_arrow_stream;
 use backtester_core::engine::{EngineConfig, EngineError, EngineMode, Strategy as CoreStrategy};
+use backtester_core::l3_source::{ArrowL3Source, L3Source};
 use backtester_core::latency_model::{ConstantLatency, LogNormalJitter};
-use backtester_core::queue_model::{ConservativeQueue, VolumeClockQueue};
+use backtester_core::queue_model::{ConservativeQueue, L3ExactQueue, VolumeClockQueue};
 use backtester_core::stats::{equity_curve_from_pnl_deltas, full_pnl_history};
 use backtester_core::tick_source::{ArrowTickSource, TickSource};
 use backtester_core::types::{Order, OrderReport, OrderType, Side, Tick};
@@ -171,6 +172,10 @@ pub struct Backtester {
     max_position: i64,
     /// Kill-switch PnL floor, fixed-point, must be <= 0 to have effect (0 = disabled).
     max_loss: i64,
+    /// Depth mode: "l2" (default) or "l3".
+    depth_mode: String,
+    /// Optional L3 order-by-order depth feeds: symbol_name -> polars LazyFrame.
+    l3_data: Option<Py<PyAny>>,
 }
 
 #[pyclass]
@@ -291,7 +296,7 @@ impl BacktestResult {
 #[pymethods]
 impl Backtester {
     #[new]
-    #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=None, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all", maker_fee_bps=0, taker_fee_bps=0, ring_buffer_size=10000, symbol_map=None, queue_model="conservative", latency_model="constant", latency_mean_ns=0, latency_std_ns=0, max_open_orders=0, max_position=0, max_loss=0))]
+    #[pyo3(signature = (data, feed_latency_ns=0, order_update_latency_ns=None, python_mode="tick", batch_ms=0, seed=42, trade_log_mode="all", maker_fee_bps=0, taker_fee_bps=0, ring_buffer_size=10000, symbol_map=None, queue_model="conservative", latency_model="constant", latency_mean_ns=0, latency_std_ns=0, max_open_orders=0, max_position=0, max_loss=0, depth_mode="l2", l3_data=None))]
     #[allow(clippy::too_many_arguments)] // Python API intentionally exposes many keyword arguments
     pub fn new(
         py: Python<'_>,
@@ -313,6 +318,8 @@ impl Backtester {
         max_open_orders: usize,
         max_position: i64,
         max_loss: i64,
+        depth_mode: &str,
+        l3_data: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         if ring_buffer_size == 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -379,6 +386,21 @@ impl Backtester {
                 "unknown queue_model '{queue_model}'; expected 'conservative' or 'volume_clock'"
             )));
         }
+        if !matches!(depth_mode, "l2" | "l3") {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unknown depth_mode '{depth_mode}'; expected 'l2' or 'l3'"
+            )));
+        }
+        if depth_mode == "l3" && l3_data.is_none() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "depth_mode='l3' requires l3_data",
+            ));
+        }
+        if depth_mode == "l2" && l3_data.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "l3_data requires depth_mode='l3'",
+            ));
+        }
         if !matches!(latency_model, "constant" | "log_normal") {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "unknown latency_model '{latency_model}'; expected 'constant' or 'log_normal'"
@@ -409,6 +431,8 @@ impl Backtester {
             max_open_orders,
             max_position,
             max_loss,
+            depth_mode: depth_mode.to_string(),
+            l3_data,
         })
     }
 
@@ -456,7 +480,7 @@ impl Backtester {
 
         let strat = PyStrategy { obj: strategy };
         let mut engine = AnyEngine::new(
-            &self.queue_model,
+            self.effective_queue_model(),
             &self.latency_model,
             self.feed_latency_ns,
             self.order_update_latency_ns,
@@ -478,12 +502,12 @@ impl Backtester {
 
         let symbol_ids = build_symbol_ids(&keys, self.symbol_map.as_ref())?;
 
-        for k in keys {
-            let symbol_id = symbol_ids.get(&k).copied().ok_or_else(|| {
+        for k in &keys {
+            let symbol_id = symbol_ids.get(k).copied().ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("missing symbol id")
             })?;
             let lf_any = data_dict
-                .get_item(&k)?
+                .get_item(k)?
                 .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("missing key"))?;
 
             let df = lf_any.call_method0("collect")?;
@@ -492,6 +516,10 @@ impl Backtester {
             let source =
                 ArrowTickSource::try_new(symbol_id, stream).map_err(tick_source_error_to_pyerr)?;
             engine.add_tick_source(Box::new(source));
+        }
+
+        if self.depth_mode == "l3" {
+            attach_l3_sources(py, &mut engine, self.l3_data.as_ref(), &keys, &symbol_ids)?;
         }
 
         engine.run()?;
@@ -514,6 +542,11 @@ impl Backtester {
         py: Python<'_>,
         strategies: Vec<Py<PyAny>>,
     ) -> PyResult<Vec<BacktestResult>> {
+        if self.depth_mode == "l3" {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "run_many does not support depth_mode='l3'; use run() or run_arrow()",
+            ));
+        }
         // 1. Pre-load data to avoid GIL during parallel execution setup.
         let events = parse_polars_data(
             py,
@@ -563,7 +596,7 @@ impl Backtester {
 
         let latency_ns = self.feed_latency_ns;
         let order_latency_ns = self.order_update_latency_ns;
-        let q_model = self.queue_model.clone();
+        let q_model = self.effective_queue_model().to_string();
         let l_model = self.latency_model.clone();
         let l_mean = self.latency_mean_ns;
         let l_std = self.latency_std_ns;
@@ -643,7 +676,7 @@ impl Backtester {
 
         let strat = PyStrategy { obj: strategy };
         let mut engine = AnyEngine::new(
-            &self.queue_model,
+            self.effective_queue_model(),
             &self.latency_model,
             self.feed_latency_ns,
             self.order_update_latency_ns,
@@ -694,16 +727,36 @@ impl Backtester {
                 })?;
                 engine.add_tick_source(Box::new(source));
             }
+
+            if self.depth_mode == "l3" {
+                attach_l3_sources(py, &mut engine, self.l3_data.as_ref(), &keys, &symbol_ids)?;
+            }
         } else {
             // Single-stream path (legacy): backward-compatible, symbol_id = 1.
             let arrow_stream = get_arrow_stream(stream_bound)?;
             let source =
                 ArrowTickSource::try_new(1, arrow_stream).map_err(tick_source_error_to_pyerr)?;
             engine.add_tick_source(Box::new(source));
+
+            if self.depth_mode == "l3" {
+                let keys = single_l3_key(py, self.l3_data.as_ref())?;
+                let symbol_ids = HashMap::from([(keys[0].clone(), 1_u32)]);
+                attach_l3_sources(py, &mut engine, self.l3_data.as_ref(), &keys, &symbol_ids)?;
+            }
         }
 
         engine.run()?;
         Ok(engine.extract_result())
+    }
+}
+
+impl Backtester {
+    fn effective_queue_model(&self) -> &str {
+        if self.depth_mode == "l3" {
+            "l3_exact"
+        } else {
+            &self.queue_model
+        }
     }
 }
 
@@ -747,6 +800,71 @@ fn tick_source_error_to_pyerr(error: TickSourceError) -> PyErr {
     }
 }
 
+fn attach_l3_sources(
+    py: Python<'_>,
+    engine: &mut AnyEngine,
+    l3_data: Option<&Py<PyAny>>,
+    keys: &[String],
+    symbol_ids: &HashMap<String, u32>,
+) -> PyResult<()> {
+    let Some(l3_data) = l3_data else {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "depth_mode='l3' requires l3_data",
+        ));
+    };
+    let l3_any = l3_data.bind(py);
+    let l3_dict = l3_any
+        .downcast::<PyDict>()
+        .map_err(|_| pyo3::exceptions::PyTypeError::new_err("l3_data must be a dict"))?;
+
+    for key in keys {
+        let symbol_id = symbol_ids.get(key).copied().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "missing symbol id for L3 data key '{key}'"
+            ))
+        })?;
+        let lf_any = l3_dict.get_item(key)?.ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "l3_data is missing entry for data key '{key}'"
+            ))
+        })?;
+        let df = lf_any.call_method0("collect")?;
+        let table = df.call_method0("to_arrow")?;
+        let stream = get_arrow_stream(&table)?;
+        let source = ArrowL3Source::try_new(symbol_id, stream).map_err(|error| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "l3_data stream for symbol '{key}': {error}"
+            ))
+        })?;
+        engine.add_l3_source(Box::new(source));
+    }
+
+    Ok(())
+}
+
+fn single_l3_key(py: Python<'_>, l3_data: Option<&Py<PyAny>>) -> PyResult<Vec<String>> {
+    let Some(l3_data) = l3_data else {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "depth_mode='l3' requires l3_data",
+        ));
+    };
+    let l3_any = l3_data.bind(py);
+    let l3_dict = l3_any
+        .downcast::<PyDict>()
+        .map_err(|_| pyo3::exceptions::PyTypeError::new_err("l3_data must be a dict"))?;
+    let mut keys: Vec<String> = l3_dict
+        .iter()
+        .map(|(key, _)| key.extract::<String>())
+        .collect::<PyResult<_>>()?;
+    keys.sort();
+    if keys.len() != 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "run_arrow single-stream L3 mode requires exactly one l3_data entry",
+        ));
+    }
+    Ok(keys)
+}
+
 fn checksum_from_polars_data(py: Python<'_>, data: &Py<PyAny>) -> PyResult<i64> {
     let data_any = data.bind(py);
     let data_dict = data_any.downcast::<PyDict>()?;
@@ -787,8 +905,10 @@ fn checksum_from_polars_data(py: Python<'_>, data: &Py<PyAny>) -> PyResult<i64> 
 enum AnyEngine {
     ConservativeConstant(Engine<ConservativeQueue, PyStrategy, ConstantLatency>),
     VolumeClockConstant(Engine<VolumeClockQueue, PyStrategy, ConstantLatency>),
+    L3ExactConstant(Engine<L3ExactQueue, PyStrategy, ConstantLatency>),
     ConservativeLogNormal(Engine<ConservativeQueue, PyStrategy, LogNormalJitter>),
     VolumeClockLogNormal(Engine<VolumeClockQueue, PyStrategy, LogNormalJitter>),
+    L3ExactLogNormal(Engine<L3ExactQueue, PyStrategy, LogNormalJitter>),
 }
 
 impl AnyEngine {
@@ -822,6 +942,12 @@ impl AnyEngine {
                 config,
                 const_l,
             )),
+            ("l3_exact", "log_normal") => {
+                AnyEngine::L3ExactLogNormal(Engine::new(L3ExactQueue, strat, config, log_l))
+            }
+            ("l3_exact", _) => {
+                AnyEngine::L3ExactConstant(Engine::new(L3ExactQueue, strat, config, const_l))
+            }
             (_, "log_normal") => AnyEngine::ConservativeLogNormal(Engine::new(
                 ConservativeQueue,
                 strat,
@@ -841,8 +967,21 @@ impl AnyEngine {
         match self {
             AnyEngine::ConservativeConstant(e) => e.add_tick_source(source),
             AnyEngine::VolumeClockConstant(e) => e.add_tick_source(source),
+            AnyEngine::L3ExactConstant(e) => e.add_tick_source(source),
             AnyEngine::ConservativeLogNormal(e) => e.add_tick_source(source),
             AnyEngine::VolumeClockLogNormal(e) => e.add_tick_source(source),
+            AnyEngine::L3ExactLogNormal(e) => e.add_tick_source(source),
+        }
+    }
+
+    fn add_l3_source(&mut self, source: Box<dyn L3Source>) {
+        match self {
+            AnyEngine::ConservativeConstant(e) => e.add_l3_source(source),
+            AnyEngine::VolumeClockConstant(e) => e.add_l3_source(source),
+            AnyEngine::L3ExactConstant(e) => e.add_l3_source(source),
+            AnyEngine::ConservativeLogNormal(e) => e.add_l3_source(source),
+            AnyEngine::VolumeClockLogNormal(e) => e.add_l3_source(source),
+            AnyEngine::L3ExactLogNormal(e) => e.add_l3_source(source),
         }
     }
 
@@ -850,8 +989,10 @@ impl AnyEngine {
         match self {
             AnyEngine::ConservativeConstant(e) => e.push_event(ts_sim, kind),
             AnyEngine::VolumeClockConstant(e) => e.push_event(ts_sim, kind),
+            AnyEngine::L3ExactConstant(e) => e.push_event(ts_sim, kind),
             AnyEngine::ConservativeLogNormal(e) => e.push_event(ts_sim, kind),
             AnyEngine::VolumeClockLogNormal(e) => e.push_event(ts_sim, kind),
+            AnyEngine::L3ExactLogNormal(e) => e.push_event(ts_sim, kind),
         }
     }
 
@@ -859,8 +1000,10 @@ impl AnyEngine {
         match self {
             AnyEngine::ConservativeConstant(e) => e.run().map_err(engine_error_to_pyerr),
             AnyEngine::VolumeClockConstant(e) => e.run().map_err(engine_error_to_pyerr),
+            AnyEngine::L3ExactConstant(e) => e.run().map_err(engine_error_to_pyerr),
             AnyEngine::ConservativeLogNormal(e) => e.run().map_err(engine_error_to_pyerr),
             AnyEngine::VolumeClockLogNormal(e) => e.run().map_err(engine_error_to_pyerr),
+            AnyEngine::L3ExactLogNormal(e) => e.run().map_err(engine_error_to_pyerr),
         }
     }
 
@@ -881,8 +1024,10 @@ impl AnyEngine {
         match self {
             AnyEngine::ConservativeConstant(e) => extract!(e),
             AnyEngine::VolumeClockConstant(e) => extract!(e),
+            AnyEngine::L3ExactConstant(e) => extract!(e),
             AnyEngine::ConservativeLogNormal(e) => extract!(e),
             AnyEngine::VolumeClockLogNormal(e) => extract!(e),
+            AnyEngine::L3ExactLogNormal(e) => extract!(e),
         }
     }
 }

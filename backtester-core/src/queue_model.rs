@@ -1,4 +1,4 @@
-use crate::orderbook_l2::OrderBookL2;
+use crate::orderbook_l2::MarketDepth;
 use crate::types::{Order, Side, Tick};
 
 /// Queue model for simulating passive fill probability / queue position.
@@ -7,7 +7,7 @@ use crate::types::{Order, Side, Tick};
 pub trait QueueModel {
     type State: Clone + Copy + core::fmt::Debug + PartialEq + Eq;
 
-    fn register_order(&mut self, order: &Order, book: &OrderBookL2) -> Self::State;
+    fn register_order(&mut self, order: &Order, book: &dyn MarketDepth) -> Self::State;
 
     fn check_fill(
         &mut self,
@@ -25,7 +25,7 @@ pub struct NoopQueue;
 impl QueueModel for NoopQueue {
     type State = ();
 
-    fn register_order(&mut self, _order: &Order, _book: &OrderBookL2) -> Self::State {
+    fn register_order(&mut self, _order: &Order, _book: &dyn MarketDepth) -> Self::State {
         // unit
     }
 
@@ -57,7 +57,7 @@ pub struct ConservativeQueueState {
 impl QueueModel for ConservativeQueue {
     type State = ConservativeQueueState;
 
-    fn register_order(&mut self, order: &Order, book: &OrderBookL2) -> Self::State {
+    fn register_order(&mut self, order: &Order, book: &dyn MarketDepth) -> Self::State {
         Self::State {
             qty_ahead: book.level_qty(order.side, order.price),
         }
@@ -119,7 +119,7 @@ pub struct VolumeClockQueueState {
 impl QueueModel for VolumeClockQueue {
     type State = VolumeClockQueueState;
 
-    fn register_order(&mut self, order: &Order, book: &OrderBookL2) -> Self::State {
+    fn register_order(&mut self, order: &Order, book: &dyn MarketDepth) -> Self::State {
         Self::State {
             queue_pos: book.level_qty(order.side, order.price),
             cum_volume: 0,
@@ -167,6 +167,31 @@ impl QueueModel for VolumeClockQueue {
         let fill = available.min(remaining_qty).max(0);
         state.claimed = state.claimed.saturating_add(fill);
         fill
+    }
+}
+
+/// L3-exact queue model: snapshots exact venue queue quantity ahead at entry.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct L3ExactQueue;
+
+impl QueueModel for L3ExactQueue {
+    type State = ConservativeQueueState;
+
+    fn register_order(&mut self, order: &Order, book: &dyn MarketDepth) -> Self::State {
+        Self::State {
+            qty_ahead: book.qty_ahead(order.side, order.price, order.order_id),
+        }
+    }
+
+    fn check_fill(
+        &mut self,
+        order: &Order,
+        remaining_qty: i64,
+        trade: &Tick,
+        state: &mut Self::State,
+    ) -> i64 {
+        let mut conservative = ConservativeQueue;
+        conservative.check_fill(order, remaining_qty, trade, state)
     }
 }
 
