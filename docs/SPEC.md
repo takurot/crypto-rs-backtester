@@ -115,6 +115,7 @@ pub struct L2Update {
 #[repr(C)]
 pub struct L3Update {
     pub ts_exchange: i64,
+    pub seq: u64,           // Stable sequence within a stream
     pub symbol_id: u32,
     pub order_id: u64,
     pub price: i64,
@@ -404,6 +405,12 @@ Optional columns for L3:
 | `order_id` | uint64 | Unique order identifier |
 | `action` | uint8 | ADD/MODIFY/DELETE |
 
+L3 mode is enabled from Python with `depth_mode="l3"` and `l3_data={symbol: lazy_frame}`.
+L3 `MODIFY` updates quantity for the same `(side, price, order_id)` queue entry; venue
+price changes should be represented as DELETE followed by ADD so queue priority remains explicit.
+When `seq` is present, L3 updates and trade ticks at the same `ts_exchange` are ordered by
+(`ts_exchange`, `seq`); if omitted, row order is used as the L3 sequence fallback.
+
 For performance and determinism, each input stream SHOULD be pre-sorted by (`ts_exchange`, `seq`) ascending. The engine MAY reject unsorted input rather than sorting internally.
 
 ### 6.3 Performance Targets
@@ -662,7 +669,7 @@ fn bench_python_callback_batch(c: &mut Criterion) { ... }
 
 | Item | Status | Notes |
 |------|--------|-------|
-| L3 order-book support | Not started | Requires new `L3Update` event type and depth-of-book matching logic |
+| L3 order-book support | Implemented | `L3Update`, `OrderBookL3`, `L3ExactQueue`, Arrow L3 ingestion, and Python `depth_mode="l3"` opt-in |
 | Kill switch & risk limits | Not started | Pre-trade risk checks; requires new `RiskGuard` component |
 | Documentation & examples | Partial | README and architecture comments present; API reference and tutorials incomplete |
 

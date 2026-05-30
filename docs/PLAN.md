@@ -262,6 +262,24 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Suggested tests**:
         - `test_queue_volume_clock_fills_when_cum_volume_exceeds_queue_pos()`
 
+- [x] **3.2.2 L3 Exact Queue** `[Depends on 3.2.1]`
+    - Implement `OrderBookL3` with per-price FIFO order queues.
+    - Add `L3Update`, `EventKind::L3Update`, Arrow L3 ingestion, and `L3ExactQueue`.
+    - Python opt-in: `Backtester(..., depth_mode="l3", l3_data={symbol: lazy_frame})`.
+    - L2/L3 depth updates are mutually exclusive per symbol at runtime.
+    - **Deliverable**: Exact queue-ahead snapshots from order-by-order depth feeds.
+    - **Tests**:
+        - `l3_book_tracks_fifo_queue_and_exact_qty_ahead`
+        - `l3_exact_queue_matches_manual_calculation_and_beats_conservative`
+        - `engine_routes_l3_updates_to_l3_exact_queue_model`
+        - `engine_rejects_mixed_l2_and_l3_depth_for_same_symbol`
+        - `l3_delete_after_submit_advances_active_queue_state`
+        - `l3_and_tick_sources_at_same_timestamp_follow_feed_seq_order`
+        - `arrow_l3_source_reads_required_order_id_and_action_columns`
+        - `arrow_l3_source_uses_row_order_seq_when_seq_column_is_absent`
+        - `test_e2e_l3_exact_fill_uses_l3_queue_position`
+        - `test_e2e_l3_exact_fill_works_with_run_arrow_dict_stream`
+
 ### 3.3 Crypto Specifics
 - [x] **3.3.1 Funding Rate Simulation** `[Depends on 1.3.2]`
     - Add `FundingEvent` to data types.
