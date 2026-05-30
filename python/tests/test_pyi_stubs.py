@@ -1,9 +1,14 @@
 """Tests that verify _core.pyi stubs are present and mypy accepts them (Issue #62)."""
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
+
+_MYPY_AVAILABLE = importlib.util.find_spec("mypy") is not None
 
 
 def test_core_pyi_stub_exists() -> None:
@@ -16,6 +21,7 @@ def test_init_pyi_stub_exists() -> None:
     assert stub.exists(), f"__init__.pyi not found at {stub}"
 
 
+@pytest.mark.skipif(not _MYPY_AVAILABLE, reason="mypy not installed")
 def test_mypy_accepts_stub_annotated_strategy(tmp_path: Path) -> None:
     """mypy must not report errors on a strategy annotated via TYPE_CHECKING."""
     strategy_src = """
