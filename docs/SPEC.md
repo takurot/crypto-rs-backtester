@@ -670,7 +670,7 @@ fn bench_python_callback_batch(c: &mut Criterion) { ... }
 | Item | Status | Notes |
 |------|--------|-------|
 | L3 order-book support | Implemented | `L3Update`, `OrderBookL3`, `L3ExactQueue`, Arrow L3 ingestion, and Python `depth_mode="l3"` opt-in |
-| Kill switch & risk limits | Not started | Pre-trade risk checks; requires new `RiskGuard` component |
+| Kill switch & risk limits | Completed | `RiskGuard` implemented in `backtester-core/src/risk_guard.rs`; unit tests (`risk_guard::tests::*`) and Python E2E tests (`test_e2e_kill_switch.py`) present |
 | Documentation & examples | Partial | README and architecture comments present; API reference and tutorials incomplete |
 
 ---
