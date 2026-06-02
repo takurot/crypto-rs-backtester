@@ -341,7 +341,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "backtester-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arrow",
  "criterion",
@@ -363,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "backtester-py"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arrow",
  "backtester-core",
