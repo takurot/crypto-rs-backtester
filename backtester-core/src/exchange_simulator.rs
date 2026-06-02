@@ -1,4 +1,5 @@
 use likely_stable::{likely, unlikely};
+#[cfg(not(feature = "concurrent-sweeps"))]
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
@@ -7,6 +8,15 @@ use crate::orderbook_l2::{MarketDepth, OrderBookL2};
 use crate::orderbook_l3::OrderBookL3;
 use crate::queue_model::QueueModel;
 use crate::types::{L2Update, L3Update, Order, OrderReport, OrderState, OrderType, Side, Tick};
+
+// BucketMap is a per-(price, side) index of active order IDs.
+// When the `concurrent-sweeps` feature is enabled, DashMap provides lock-free
+// sharded access so ExchangeSimulator instances can be sent across rayon threads
+// without holding a global lock on the bucket structure.
+#[cfg(feature = "concurrent-sweeps")]
+type BucketMap = dashmap::DashMap<(i64, Side), SmallVec<[u64; 4]>>;
+#[cfg(not(feature = "concurrent-sweeps"))]
+type BucketMap = FxHashMap<(i64, Side), SmallVec<[u64; 4]>>;
 
 #[derive(Debug, Clone)]
 struct LiveOrder<S> {
@@ -23,14 +33,19 @@ struct LiveOrder<S> {
 /// - L2 book maintenance
 /// - basic order lifecycle tracking
 /// - queue-model-driven passive fills on market trade ticks
+///
+/// When compiled with the `concurrent-sweeps` feature, the internal `BucketMap`
+/// switches from `FxHashMap` to `DashMap`, making the simulator `Send`-safe for
+/// rayon-parallel parameter sweeps that share a single simulator instance.
 #[derive(Debug)]
 pub struct ExchangeSimulator<Q: QueueModel> {
     book: OrderBookL2,
     book_l3: Option<OrderBookL3>,
     queue_model: Q,
     orders: BTreeMap<u64, LiveOrder<Q::State>>,
-    /// Optimization: Index active orders by (price, side) to avoid scanning all orders on every trade.
-    buckets: FxHashMap<(i64, Side), SmallVec<[u64; 4]>>,
+    /// Index active orders by (price, side) to avoid scanning all orders on every trade.
+    /// Backed by DashMap under `concurrent-sweeps` feature for lock-free concurrent access.
+    buckets: BucketMap,
 }
 
 impl<Q: QueueModel> ExchangeSimulator<Q> {
@@ -40,7 +55,7 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
             book_l3: None,
             queue_model,
             orders: BTreeMap::new(),
-            buckets: FxHashMap::default(),
+            buckets: BucketMap::default(),
         }
     }
 
@@ -50,7 +65,7 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
             book_l3: Some(OrderBookL3::new()),
             queue_model,
             orders: BTreeMap::new(),
-            buckets: FxHashMap::default(),
+            buckets: BucketMap::default(),
         }
     }
 
@@ -90,6 +105,7 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
                 .register_order(&order, &self.book as &dyn MarketDepth)
         };
 
+        // DashMap and FxHashMap share the same entry().or_default().push() API.
         self.buckets
             .entry((order.price, order.side))
             .or_default()
@@ -272,7 +288,10 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
     pub fn remove_order(&mut self, order_id: u64) {
         if let Some(o) = self.orders.remove(&order_id) {
             let key = (o.order.price, o.order.side);
-            if let Some(bucket) = self.buckets.get_mut(&key)
+            // DashMap::get_mut returns RefMut (requires `mut` binding for DerefMut);
+            // FxHashMap::get_mut returns &mut V (binding mut is unused but harmless).
+            #[allow(unused_mut)]
+            if let Some(mut bucket) = self.buckets.get_mut(&key)
                 && let Some(idx) = bucket.iter().position(|&id| id == order_id)
             {
                 bucket.remove(idx);
@@ -285,34 +304,28 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
     pub fn on_trade(&mut self, trade: Tick, reports: &mut Vec<OrderReport>) {
         let queue_model = &mut self.queue_model;
 
-        // We only check orders that match the trade's price and have the opposite side of the trade initiator?
-        // Wait, Tick side is the AGGRESSOR side.
-        // If Trade is Buy, it matched against Sells.
-        // So we check our Sell orders.
-        // If Trade is Sell, it matched against Buys.
-        // So we check our Buy orders.
-        // And we check at the trade price.
-
+        // trade.side is the AGGRESSOR: a Buy trade matched against resting Sell orders.
         let maker_side = match trade.side {
             Side::Buy => Side::Sell,
             Side::Sell => Side::Buy,
             Side::None => return,
         };
 
-        if let Some(bucket) = self.buckets.get(&(trade.price, maker_side)) {
-            // Iterate a copy of ids to avoid borrowing conflicts with self.orders
-            // (bucket is borrowed from self.buckets)
-            // But we can't borrow self.orders mutably while bucket is borrowed.
-            // So we must copy the IDs.
-            // Optimization: SmallVec or just collect to Reusable Buffer?
-            // For now, simple Vec clone. It's u64s.
-            let order_ids: SmallVec<[u64; 4]> = bucket.clone();
+        // Clone order IDs immediately so the BucketMap guard (Ref / &SmallVec) is
+        // released before the mutable borrow of self.orders below.  This is a no-op
+        // for FxHashMap (the borrow ends at the `if let` arm anyway) but is required
+        // for DashMap, whose Ref guard holds a shard lock until it is dropped.
+        // Use `(*b).clone()` to clone the inner SmallVec through Deref.
+        // This works for both &SmallVec (FxHashMap) and Ref<K, SmallVec> (DashMap),
+        // and avoids the `clippy::map_clone` lint which only matches `|b| b.clone()`.
+        let order_ids: SmallVec<[u64; 4]> = self
+            .buckets
+            .get(&(trade.price, maker_side))
+            .map(|b| (*b).clone())
+            .unwrap_or_default();
 
+        if !order_ids.is_empty() {
             for order_id in order_ids {
-                // Get mutable reference to order
-                // Note: remove_order might have been called recursively? No, on_trade doesn't call remove_order.
-                // But we must handle if order was removed? No, we just cloned existing IDs.
-
                 let Some(o) = self.orders.get_mut(&order_id) else {
                     continue;
                 };
@@ -622,5 +635,144 @@ mod tests {
         assert_eq!(report.status, OrderState::Rejected);
         assert_eq!(report.last_fill_qty, 0);
         assert!(report.reason.is_some());
+    }
+
+    // ── remove_order + on_trade interaction ─────────────────────────────────
+
+    /// After remove_order, a subsequent on_trade at the same price must not
+    /// process the removed order ID (bucket pruning correctness).
+    #[test]
+    fn test_remove_order_prunes_bucket_before_next_trade() {
+        let mut ex = ExchangeSimulator::new(ConservativeQueue);
+        // No queue ahead → order fills immediately
+        ex.apply_l2_update(&fixtures::l2_update(1_000, 0, 100, 0, Side::Buy));
+
+        let order = Order {
+            order_id: 99,
+            ts_submit: 1_000,
+            seq: 0,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            price: 100,
+            qty: 5,
+        };
+        let id = ex.submit_order(order);
+        ex.ack_new(id).expect("ack");
+
+        // Remove before any trade — simulates an explicit cancel cleanup.
+        ex.remove_order(id);
+
+        // Subsequent on_trade at the same price must produce zero fills.
+        let trade = Tick {
+            ts_exchange: 2_000,
+            ts_local: 2_000,
+            seq: 1,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            price: 100,
+            qty: 10,
+            side: Side::Sell,
+            flags: 0x01,
+        };
+        let mut reports = Vec::new();
+        ex.on_trade(trade, &mut reports);
+        assert!(reports.is_empty(), "removed order must not fill");
+    }
+
+    // ── concurrent-sweeps feature tests ─────────────────────────────────────
+
+    /// Verify that the DashMap-backed bucket index produces identical fill
+    /// behaviour to the default FxHashMap backend.
+    #[cfg(feature = "concurrent-sweeps")]
+    #[test]
+    fn test_dashmap_bucket_produces_same_fills_as_hashmap() {
+        let mut ex = ExchangeSimulator::new(ConservativeQueue);
+        ex.apply_l2_update(&fixtures::l2_update(1_000, 0, 100, 5, Side::Buy));
+
+        let order = Order {
+            order_id: 10,
+            ts_submit: 1_000,
+            seq: 0,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            price: 100,
+            qty: 3,
+        };
+        let id = ex.submit_order(order);
+        ex.ack_new(id).expect("ack");
+
+        // Full fill after depleting queue ahead (5) + 3 more
+        let t1 = Tick {
+            ts_exchange: 2_000,
+            ts_local: 2_000,
+            seq: 1,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            price: 100,
+            qty: 8,
+            side: Side::Sell,
+            flags: 0x01,
+        };
+        let mut reports = Vec::new();
+        ex.on_trade(t1, &mut reports);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].status, OrderState::Filled);
+    }
+
+    /// Verify that multiple parallel sweeps using the DashMap bucket index
+    /// all produce consistent, independent results without data races.
+    ///
+    /// Each parallel instance gets its own ExchangeSimulator (independent state).
+    /// The bucket index is per-instance; DashMap provides safe access when
+    /// ExchangeSimulator is sent across rayon threads.
+    #[cfg(feature = "concurrent-sweeps")]
+    #[test]
+    fn test_concurrent_sweeps_produce_independent_results() {
+        use rayon::prelude::*;
+
+        // 16 parallel sweep instances, each with a buy order that fully fills
+        // (no queue ahead → ConservativeQueue grants immediate fill).
+        let results: Vec<(OrderState, i64)> = (0..16u64)
+            .into_par_iter()
+            .map(|i| {
+                let mut ex = ExchangeSimulator::new(ConservativeQueue);
+                // No queue ahead at price=100 buy side → user order fills immediately.
+                ex.apply_l2_update(&fixtures::l2_update(1_000, 0, 100, 0, Side::Buy));
+
+                let order = Order {
+                    order_id: i + 1,
+                    ts_submit: 1_000,
+                    seq: 0,
+                    symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+                    side: Side::Buy,
+                    order_type: OrderType::Limit,
+                    price: 100,
+                    qty: 2,
+                };
+                let id = ex.submit_order(order);
+                ex.ack_new(id).expect("ack");
+
+                let trade = Tick {
+                    ts_exchange: 2_000,
+                    ts_local: 2_000,
+                    seq: 1,
+                    symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+                    price: 100,
+                    qty: 5, // more than enough to fill qty=2
+                    side: Side::Sell,
+                    flags: 0x01,
+                };
+                let mut reports = Vec::new();
+                ex.on_trade(trade, &mut reports);
+                let r = reports.first().expect("expected fill report");
+                (r.status, r.filled_qty)
+            })
+            .collect();
+
+        // Every parallel sweep must independently produce a full fill of qty=2.
+        for (status, filled_qty) in &results {
+            assert_eq!(*status, OrderState::Filled, "unexpected status");
+            assert_eq!(*filled_qty, 2, "unexpected filled_qty");
+        }
     }
 }

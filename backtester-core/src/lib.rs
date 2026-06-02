@@ -7,6 +7,8 @@ pub mod fixtures;
 pub mod io;
 pub mod l3_source;
 pub mod latency_model;
+#[cfg(feature = "numa")]
+pub mod numa;
 pub mod orderbook_l2;
 pub mod orderbook_l3;
 pub mod queue_model;
@@ -28,7 +30,8 @@ pub use orderbook_l2::{MarketDepth, OrderBookL2};
 pub use orderbook_l3::OrderBookL3;
 pub use rng::make_small_rng;
 pub use stats::{
-    BacktestStats, IncrementalStats, TradeFill, TradeLog, TradeLogMode, calculate_stats,
+    BacktestStats, CpuStatsBackend, IncrementalStats, StatsBackend, TradeFill, TradeLog,
+    TradeLogMode, calculate_stats, calculate_stats_with_backend,
 };
 pub use sweep::{SweepResult, run_parameter_sweep};
 pub use tick_source::{ArrowTickSource, TickSource, TickSourceError};
