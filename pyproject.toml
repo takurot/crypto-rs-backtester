@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "crypto-rs-backtester"
-version = "0.1.1"
+version = "0.1.2"
 description = "Rust-based tick-level backtester (WIP)"
 readme = "README.md"
 requires-python = ">=3.9"
