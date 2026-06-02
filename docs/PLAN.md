@@ -584,11 +584,15 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Result**: Attempted but skipped. Manual unrolling (4x) caused ~10% regression (169ms -> 186ms) in `bench_engine_e2e_batch`. The compiler likely optimizes the simple loop better. Reverted to baseline.
 
 ### 7.6 Parallel & Concurrent Optimizations
-- [ ] **7.6.1 Lock-Free Order Bucket Index**
+- [x] **7.6.1 Lock-Free Order Bucket Index**
     - Replace `FxHashMap<(i64, Side), Vec<u64>>` with a lock-free concurrent map for parallel parameter sweeps.
     - Use `dashmap` or `crossbeam-skiplist` if order bucket access becomes a contention point.
     - **Deliverable**: Better scaling for multi-core sweeps with shared read patterns.
-    - **Notes**: Single-run backtests are single-threaded; this is for sweep scenarios.
+    - **Notes**: Implemented `BucketMap` type alias in `exchange_simulator.rs`. When the optional
+      `concurrent-sweeps` Cargo feature is enabled, the bucket index switches from `FxHashMap`
+      to `DashMap` (sharded lock-free map). Single-run backtests use `FxHashMap` (no overhead).
+      `on_trade` releases the DashMap shard lock immediately by cloning order IDs before the
+      `orders` loop. PR #87.
 
 - [x] **7.6.2 Chunked Parallel Stats Computation**
     - For large trade logs (>100k fills), parallelize stats computation using `rayon::par_chunks`.
@@ -597,10 +601,15 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Result**: Implemented using Rayon. `bench_stats_sharpe_parallel` (~371µs) is ~1.5x faster than SIMD (~587µs) and ~5.5x faster than scalar (~2072µs) for 1M items.
 
 ### 7.7 Hardware-Specific Optimizations
-- [ ] **7.7.1 NUMA-Aware Memory Allocation**
+- [x] **7.7.1 NUMA-Aware Memory Allocation**
     - For multi-socket systems, use `numactl` or `hwloc`-aware allocators to pin memory near compute cores.
     - Particularly important for large Arrow buffers in parameter sweeps.
     - **Deliverable**: Reduced cross-socket memory latency.
+    - **Notes**: Added `numa` Cargo feature that exposes `tikv-jemallocator` to consuming crates.
+      Setting the global allocator in a library is an anti-pattern, so the guide lives in
+      `src/numa.rs` with full configuration examples (`MALLOC_CONF=narenas:N`, thread pinning via
+      `numactl`). Enable on multi-socket servers when Arrow buffers exceed ~512 MiB per worker.
+      PR #87.
 
 - [x] **7.7.2 Cache Prefetching Hints**
     - Use `std::intrinsics::prefetch_*` (nightly) or inline assembly to prefetch upcoming tick data.
@@ -608,10 +617,18 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Deliverable**: Reduced cache miss latency in tight loops.
     - **Notes**: Implemented in `utils.rs` using `_mm_prefetch` (x86_64) and `prfm` (aarch64). Prefetches Arrow buffer memory 2 ticks ahead in `ArrowTickSource::read_tick_at`. PR #25.
 
-- [ ] **7.7.3 GPU-Accelerated Statistics (Optional)**
+- [~] **7.7.3 GPU-Accelerated Statistics (Optional) — Design Documented**
     - For very large datasets (>10M trades), offload Sharpe/Sortino/equity curve computation to GPU via `wgpu` or `cuda-rs`.
     - **Deliverable**: 10-100x speedup for stats on massive result sets.
     - **Considerations**: Only worthwhile for research-heavy use cases; increases build complexity.
+    - **Design (PR #87)**:
+        - `StatsBackend` trait in `stats.rs` abstracts Sharpe/Sortino computation.
+        - `CpuStatsBackend` wraps existing SIMD + Rayon implementations.
+        - `GpuStatsBackend` stub behind `gpu-stats` feature (compile-time doc target).
+        - GPU implementation path: copy `&[i64]` PnL buffer to device → WGSL parallel Welford
+          reduction shader → copy scalar back. Break-even at ~10M fills (PCIe 4.0 bandwidth).
+        - **Status**: Trait + CPU backend implemented. GPU backend stubbed; full implementation
+          deferred pending ROI validation on target hardware.
 
 ### 7.8 Adaptive Runtime Tuning
 - [x] **7.8.1 Auto-Tuning Batch Size**
@@ -620,8 +637,19 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Deliverable**: Optimal batch size for varying workloads without manual tuning.
     - **Result**: Implemented AIMD-based `BatchTuner` in `engine.rs`. Dynamically scales batch size (latency up to limit) when throughput is high, and throttles back when latency target is exceeded. Verified in `test_auto_tuning`.
 
-- [ ] **7.8.2 JIT-Compiled Strategy Expressions (Speculative)**
+- [~] **7.8.2 JIT-Compiled Strategy Expressions (Speculative) — Design Documented**
     - For simple strategies (e.g., threshold-based), compile to native code at runtime using `cranelift` or `inkwell`.
     - Eliminate Python FFI overhead for hot paths.
     - **Deliverable**: Near-pure-Rust throughput for JIT-compatible strategies.
-    - **Notes**: High complexity; evaluate ROI before implementation.
+    - **Design (PR #87)**:
+        - Target: strategies that implement a `JitCompatible` marker trait + express logic as a
+          small expression tree (comparisons, arithmetic, logical ops on `f64`/`i64` fields).
+        - Cranelift IR generation: walk the expression tree → emit `cranelift_codegen::ir`
+          instructions → JIT-compile to native function pointer → call via unsafe FFI.
+        - `inkwell` (LLVM) alternative: higher optimization quality but heavier build dep.
+        - Expected ROI: 15–30% speedup for threshold strategies; negligible for strategies with
+          complex Python logic that cannot be represented as an expression tree.
+        - Build complexity: adds `cranelift-codegen` (~50 transitive deps); gate behind
+          `jit-strategies` feature.
+        - **Status**: Design documented. Full implementation deferred — evaluate ROI on real
+          strategies before adding `cranelift` to the dependency graph.
