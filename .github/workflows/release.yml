@@ -10,42 +10,41 @@ permissions:
 
 jobs:
   build:
-    name: Build wheels
+    name: Build wheels (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            interpreter: /opt/python/cp39-cp39/bin/python
+            target: x86_64
+            manylinux: auto
+          - os: ubuntu-latest
+            target: aarch64
+            manylinux: auto
           - os: macos-latest
-            target: x86_64-apple-darwin
-            interpreter: python
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            interpreter: python
+            target: universal2-apple-darwin
           - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            interpreter: python
+            target: x86_64
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: actions/setup-python@v5
+        if: matrix.os != 'ubuntu-latest'
         with:
           python-version: '3.9'
-      
+
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist -i ${{ matrix.interpreter }}
+          args: --release --out dist
           sccache: 'true'
-          manylinux: auto
-      
+          manylinux: ${{ matrix.manylinux || '' }}
+
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}-${{ matrix.target }}
+          name: wheels-${{ matrix.target }}
           path: dist
 
   sdist:
@@ -53,11 +52,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
           args: --out dist
+
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
@@ -69,7 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build, sdist]
     permissions:
-      id-token: write  # IMPORTANT: Mandatory for trusted publishing
+      id-token: write  # mandatory for OIDC trusted publishing
       contents: read
     if: github.event_name == 'release' && github.event.action == 'published'
     environment:

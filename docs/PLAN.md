@@ -317,7 +317,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Suggested tests**:
         - `test_ci_runs_rust_and_python_suites_smoke()`
 
-- [ ] **4.4 PyPI Release Automation**
+- [x] **4.4 PyPI Release Automation**
     - Configure GitHub Actions to build wheels (Linux, macOS, Windows) via `maturin`.
     - Publish to PyPI using OIDC trusted publishing on release tag.
     - **Deliverable**: Automated PyPI publishing on GitHub Release.
