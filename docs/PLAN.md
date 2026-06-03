@@ -14,7 +14,7 @@ This document outlines the detailed implementation tasks for the Rust-based Tick
 - Phase 5.1: Arrow C Stream zero-copy ingestion implemented (`backtester-py/src/arrow_utils.rs`, `run_arrow`), E2E smoke test present.
 - Phase 5.2: Streaming `TickSource` + lazy scheduling implemented (`backtester-core/src/tick_source.rs`, engine `sources` with deterministic tie-breakers).
 - Issue #30: Arrow ingestion, engine execution, and Python strategy callback failures now propagate as `Result`/Python exceptions instead of panicking across the FFI boundary.
-- Phase 5.3–5.6: not started.
+- Phase 5.3–5.6: completed. Result export (5.3), ring buffer memory limit (5.4), Rayon parallel sweep runner (5.5), and CI benchmarks (5.6) are all implemented and covered by tests.
 
 ## Test Naming & Layout Conventions (Applies to tasks below)
 - **Rust unit tests**: co-located in `backtester-core/src/**` using `#[cfg(test)] mod tests { ... }`
@@ -262,6 +262,24 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Suggested tests**:
         - `test_queue_volume_clock_fills_when_cum_volume_exceeds_queue_pos()`
 
+- [x] **3.2.2 L3 Exact Queue** `[Depends on 3.2.1]`
+    - Implement `OrderBookL3` with per-price FIFO order queues.
+    - Add `L3Update`, `EventKind::L3Update`, Arrow L3 ingestion, and `L3ExactQueue`.
+    - Python opt-in: `Backtester(..., depth_mode="l3", l3_data={symbol: lazy_frame})`.
+    - L2/L3 depth updates are mutually exclusive per symbol at runtime.
+    - **Deliverable**: Exact queue-ahead snapshots from order-by-order depth feeds.
+    - **Tests**:
+        - `l3_book_tracks_fifo_queue_and_exact_qty_ahead`
+        - `l3_exact_queue_matches_manual_calculation_and_beats_conservative`
+        - `engine_routes_l3_updates_to_l3_exact_queue_model`
+        - `engine_rejects_mixed_l2_and_l3_depth_for_same_symbol`
+        - `l3_delete_after_submit_advances_active_queue_state`
+        - `l3_and_tick_sources_at_same_timestamp_follow_feed_seq_order`
+        - `arrow_l3_source_reads_required_order_id_and_action_columns`
+        - `arrow_l3_source_uses_row_order_seq_when_seq_column_is_absent`
+        - `test_e2e_l3_exact_fill_uses_l3_queue_position`
+        - `test_e2e_l3_exact_fill_works_with_run_arrow_dict_stream`
+
 ### 3.3 Crypto Specifics
 - [x] **3.3.1 Funding Rate Simulation** `[Depends on 1.3.2]`
     - Add `FundingEvent` to data types.
@@ -299,7 +317,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Suggested tests**:
         - `test_ci_runs_rust_and_python_suites_smoke()`
 
-- [ ] **4.4 PyPI Release Automation**
+- [x] **4.4 PyPI Release Automation**
     - Configure GitHub Actions to build wheels (Linux, macOS, Windows) via `maturin`.
     - Publish to PyPI using OIDC trusted publishing on release tag.
     - **Deliverable**: Automated PyPI publishing on GitHub Release.
@@ -566,11 +584,15 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Result**: Attempted but skipped. Manual unrolling (4x) caused ~10% regression (169ms -> 186ms) in `bench_engine_e2e_batch`. The compiler likely optimizes the simple loop better. Reverted to baseline.
 
 ### 7.6 Parallel & Concurrent Optimizations
-- [ ] **7.6.1 Lock-Free Order Bucket Index**
+- [x] **7.6.1 Lock-Free Order Bucket Index**
     - Replace `FxHashMap<(i64, Side), Vec<u64>>` with a lock-free concurrent map for parallel parameter sweeps.
     - Use `dashmap` or `crossbeam-skiplist` if order bucket access becomes a contention point.
     - **Deliverable**: Better scaling for multi-core sweeps with shared read patterns.
-    - **Notes**: Single-run backtests are single-threaded; this is for sweep scenarios.
+    - **Notes**: Implemented `BucketMap` type alias in `exchange_simulator.rs`. When the optional
+      `concurrent-sweeps` Cargo feature is enabled, the bucket index switches from `FxHashMap`
+      to `DashMap` (sharded lock-free map). Single-run backtests use `FxHashMap` (no overhead).
+      `on_trade` releases the DashMap shard lock immediately by cloning order IDs before the
+      `orders` loop. PR #87.
 
 - [x] **7.6.2 Chunked Parallel Stats Computation**
     - For large trade logs (>100k fills), parallelize stats computation using `rayon::par_chunks`.
@@ -579,10 +601,15 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Result**: Implemented using Rayon. `bench_stats_sharpe_parallel` (~371µs) is ~1.5x faster than SIMD (~587µs) and ~5.5x faster than scalar (~2072µs) for 1M items.
 
 ### 7.7 Hardware-Specific Optimizations
-- [ ] **7.7.1 NUMA-Aware Memory Allocation**
+- [x] **7.7.1 NUMA-Aware Memory Allocation**
     - For multi-socket systems, use `numactl` or `hwloc`-aware allocators to pin memory near compute cores.
     - Particularly important for large Arrow buffers in parameter sweeps.
     - **Deliverable**: Reduced cross-socket memory latency.
+    - **Notes**: Added `numa` Cargo feature that exposes `tikv-jemallocator` to consuming crates.
+      Setting the global allocator in a library is an anti-pattern, so the guide lives in
+      `src/numa.rs` with full configuration examples (`MALLOC_CONF=narenas:N`, thread pinning via
+      `numactl`). Enable on multi-socket servers when Arrow buffers exceed ~512 MiB per worker.
+      PR #87.
 
 - [x] **7.7.2 Cache Prefetching Hints**
     - Use `std::intrinsics::prefetch_*` (nightly) or inline assembly to prefetch upcoming tick data.
@@ -590,10 +617,18 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Deliverable**: Reduced cache miss latency in tight loops.
     - **Notes**: Implemented in `utils.rs` using `_mm_prefetch` (x86_64) and `prfm` (aarch64). Prefetches Arrow buffer memory 2 ticks ahead in `ArrowTickSource::read_tick_at`. PR #25.
 
-- [ ] **7.7.3 GPU-Accelerated Statistics (Optional)**
+- [~] **7.7.3 GPU-Accelerated Statistics (Optional) — Design Documented**
     - For very large datasets (>10M trades), offload Sharpe/Sortino/equity curve computation to GPU via `wgpu` or `cuda-rs`.
     - **Deliverable**: 10-100x speedup for stats on massive result sets.
     - **Considerations**: Only worthwhile for research-heavy use cases; increases build complexity.
+    - **Design (PR #87)**:
+        - `StatsBackend` trait in `stats.rs` abstracts Sharpe/Sortino computation.
+        - `CpuStatsBackend` wraps existing SIMD + Rayon implementations.
+        - `GpuStatsBackend` stub behind `gpu-stats` feature (compile-time doc target).
+        - GPU implementation path: copy `&[i64]` PnL buffer to device → WGSL parallel Welford
+          reduction shader → copy scalar back. Break-even at ~10M fills (PCIe 4.0 bandwidth).
+        - **Status**: Trait + CPU backend implemented. GPU backend stubbed; full implementation
+          deferred pending ROI validation on target hardware.
 
 ### 7.8 Adaptive Runtime Tuning
 - [x] **7.8.1 Auto-Tuning Batch Size**
@@ -602,8 +637,19 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - **Deliverable**: Optimal batch size for varying workloads without manual tuning.
     - **Result**: Implemented AIMD-based `BatchTuner` in `engine.rs`. Dynamically scales batch size (latency up to limit) when throughput is high, and throttles back when latency target is exceeded. Verified in `test_auto_tuning`.
 
-- [ ] **7.8.2 JIT-Compiled Strategy Expressions (Speculative)**
+- [~] **7.8.2 JIT-Compiled Strategy Expressions (Speculative) — Design Documented**
     - For simple strategies (e.g., threshold-based), compile to native code at runtime using `cranelift` or `inkwell`.
     - Eliminate Python FFI overhead for hot paths.
     - **Deliverable**: Near-pure-Rust throughput for JIT-compatible strategies.
-    - **Notes**: High complexity; evaluate ROI before implementation.
+    - **Design (PR #87)**:
+        - Target: strategies that implement a `JitCompatible` marker trait + express logic as a
+          small expression tree (comparisons, arithmetic, logical ops on `f64`/`i64` fields).
+        - Cranelift IR generation: walk the expression tree → emit `cranelift_codegen::ir`
+          instructions → JIT-compile to native function pointer → call via unsafe FFI.
+        - `inkwell` (LLVM) alternative: higher optimization quality but heavier build dep.
+        - Expected ROI: 15–30% speedup for threshold strategies; negligible for strategies with
+          complex Python logic that cannot be represented as an expression tree.
+        - Build complexity: adds `cranelift-codegen` (~50 transitive deps); gate behind
+          `jit-strategies` feature.
+        - **Status**: Design documented. Full implementation deferred — evaluate ROI on real
+          strategies before adding `cranelift` to the dependency graph.

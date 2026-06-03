@@ -58,9 +58,6 @@ pub struct EngineConfig {
     pub max_position: i64,
     /// Kill-switch threshold: cumulative PnL floor, fixed-point, must be <= 0 (0 = disabled).
     pub max_loss: i64,
-    /// When true, exchange simulators are created with an L3 order book instead of L2.
-    /// Requires L3 sources to be added via `add_l3_source`.
-    pub use_l3_book: bool,
 }
 
 impl Default for EngineConfig {
@@ -78,7 +75,6 @@ impl Default for EngineConfig {
             max_open_orders: 0,
             max_position: 0,
             max_loss: 0,
-            use_l3_book: false,
         }
     }
 }
@@ -228,6 +224,7 @@ impl<'a> Context<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PeekedEvent {
     ts: i64,
+    seq: u64,
     source_idx: usize,
 }
 
@@ -237,6 +234,7 @@ impl Ord for PeekedEvent {
         other
             .ts
             .cmp(&self.ts)
+            .then_with(|| other.seq.cmp(&self.seq))
             .then_with(|| other.source_idx.cmp(&self.source_idx))
     }
 }
@@ -277,10 +275,11 @@ pub struct Engine<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> {
     sources: Vec<Box<dyn TickSource>>,
     source_heap: BinaryHeap<PeekedEvent>,
     is_source_heap_initialized: bool,
-    // L3 order book event sources
     l3_sources: Vec<Box<dyn L3Source>>,
     l3_source_heap: BinaryHeap<PeekedEvent>,
-    is_l3_heap_initialized: bool,
+    is_l3_source_heap_initialized: bool,
+    l2_depth_symbols: rustc_hash::FxHashSet<u32>,
+    l3_depth_symbols: rustc_hash::FxHashSet<u32>,
 
     // Optimization buffers
     reusable_reports: Vec<OrderReport>,
@@ -327,7 +326,9 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
             is_source_heap_initialized: false,
             l3_sources: Vec::new(),
             l3_source_heap: BinaryHeap::new(),
-            is_l3_heap_initialized: false,
+            is_l3_source_heap_initialized: false,
+            l2_depth_symbols: rustc_hash::FxHashSet::default(),
+            l3_depth_symbols: rustc_hash::FxHashSet::default(),
             reusable_reports: Vec::with_capacity(16),
             reusable_fills: Vec::with_capacity(16),
             reusable_trade_fills: Vec::with_capacity(16),
@@ -351,8 +352,9 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
     }
 
     pub fn add_l3_source(&mut self, source: Box<dyn L3Source>) {
+        self.l3_depth_symbols.insert(source.symbol_id());
         self.l3_sources.push(source);
-        self.is_l3_heap_initialized = false;
+        self.is_l3_source_heap_initialized = false;
     }
 
     pub fn strategy(&self) -> &S {
@@ -379,7 +381,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
 
     fn exchange_mut(&mut self, symbol_id: u32) -> &mut ExchangeSimulator<Q> {
         let qm = self.queue_model.clone();
-        let use_l3 = self.config.use_l3_book;
+        let use_l3 = self.l3_depth_symbols.contains(&symbol_id);
         self.exchanges.entry(symbol_id).or_insert_with(|| {
             if use_l3 {
                 ExchangeSimulator::new_l3(qm)
@@ -387,6 +389,26 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 ExchangeSimulator::new(qm)
             }
         })
+    }
+
+    fn mark_l2_depth(&mut self, symbol_id: u32) -> Result<(), EngineError<S::Error>> {
+        if self.l3_depth_symbols.contains(&symbol_id) {
+            return Err(EngineError::Internal(format!(
+                "mixed L2/L3 depth for symbol_id {symbol_id}"
+            )));
+        }
+        self.l2_depth_symbols.insert(symbol_id);
+        Ok(())
+    }
+
+    fn mark_l3_depth(&mut self, symbol_id: u32) -> Result<(), EngineError<S::Error>> {
+        if self.l2_depth_symbols.contains(&symbol_id) {
+            return Err(EngineError::Internal(format!(
+                "mixed L2/L3 depth for symbol_id {symbol_id}"
+            )));
+        }
+        self.l3_depth_symbols.insert(symbol_id);
+        Ok(())
     }
 
     pub fn push_event(&mut self, ts_sim: TsSimNs, kind: EventKind) {
@@ -425,14 +447,58 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                     if let Some(tick) = source.peek()? {
                         self.source_heap.push(PeekedEvent {
                             ts: tick.ts_exchange,
+                            seq: tick.seq,
                             source_idx: i,
                         });
                     }
                 }
                 self.is_source_heap_initialized = true;
             }
+            if unlikely(!self.is_l3_source_heap_initialized) {
+                self.l3_source_heap.clear();
+                for (i, source) in self.l3_sources.iter_mut().enumerate() {
+                    if let Some(update) = source.peek()? {
+                        self.l3_source_heap.push(PeekedEvent {
+                            ts: update.ts_exchange,
+                            seq: update.seq,
+                            source_idx: i,
+                        });
+                    }
+                }
+                self.is_l3_source_heap_initialized = true;
+            }
 
             let next_queue_ts = self.queue.peek().map(|e| e.ts_sim()).unwrap_or(i64::MAX);
+
+            if let Some(pe) = self.l3_source_heap.peek().copied() {
+                let l3_is_next_source = self
+                    .source_heap
+                    .peek()
+                    .map(|tick| (pe.ts, pe.seq) <= (tick.ts, tick.seq))
+                    .unwrap_or(true);
+                if likely(pe.ts <= next_queue_ts && l3_is_next_source) {
+                    let idx = pe.source_idx;
+                    self.l3_source_heap.pop();
+
+                    let update = self.l3_sources[idx].next()?.ok_or_else(|| {
+                        EngineError::Internal(format!(
+                            "l3 source {idx} was queued but had no next update"
+                        ))
+                    })?;
+
+                    self.push_event(update.ts_exchange, EventKind::L3Update(update));
+
+                    if let Some(next) = self.l3_sources[idx].peek()? {
+                        self.l3_source_heap.push(PeekedEvent {
+                            ts: next.ts_exchange,
+                            seq: next.seq,
+                            source_idx: idx,
+                        });
+                    }
+
+                    continue;
+                }
+            }
 
             // Check if we have a source event earlier than the queue
             if let Some(pe) = self.source_heap.peek()
@@ -468,46 +534,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 if let Some(next) = self.sources[idx].peek()? {
                     self.source_heap.push(PeekedEvent {
                         ts: next.ts_exchange,
-                        source_idx: idx,
-                    });
-                }
-
-                continue;
-            }
-
-            // Ingest L3 sources with the same priority logic as tick sources.
-            if unlikely(!self.is_l3_heap_initialized) {
-                self.l3_source_heap.clear();
-                for (i, src) in self.l3_sources.iter_mut().enumerate() {
-                    if let Some(u) = src.peek()? {
-                        self.l3_source_heap.push(PeekedEvent {
-                            ts: u.ts_exchange,
-                            source_idx: i,
-                        });
-                    }
-                }
-                self.is_l3_heap_initialized = true;
-            }
-
-            let next_queue_ts = self.queue.peek().map(|e| e.ts_sim()).unwrap_or(i64::MAX);
-
-            if let Some(pe) = self.l3_source_heap.peek()
-                && likely(pe.ts <= next_queue_ts)
-            {
-                let idx = pe.source_idx;
-                self.l3_source_heap.pop();
-
-                let update = self.l3_sources[idx].next()?.ok_or_else(|| {
-                    EngineError::Internal(format!(
-                        "l3 source {idx} was queued but had no next update"
-                    ))
-                })?;
-
-                self.push_event(update.ts_exchange, EventKind::L3Update(update));
-
-                if let Some(next) = self.l3_sources[idx].peek()? {
-                    self.l3_source_heap.push(PeekedEvent {
-                        ts: next.ts_exchange,
+                        seq: next.seq,
                         source_idx: idx,
                     });
                 }
@@ -622,10 +649,14 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 }
             }
             EventKind::L2Update(update) => {
+                self.mark_l2_depth(update.symbol_id)?;
                 self.exchange_mut(update.symbol_id).apply_l2_update(&update);
             }
             EventKind::L3Update(update) => {
-                self.exchange_mut(update.symbol_id).apply_l3_update(&update);
+                self.mark_l3_depth(update.symbol_id)?;
+                self.exchange_mut(update.symbol_id)
+                    .apply_l3_update(&update)
+                    .map_err(|error| EngineError::Internal(error.to_string()))?;
             }
             EventKind::Order(order) => {
                 let order_id = order.order_id;

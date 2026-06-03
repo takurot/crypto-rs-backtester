@@ -595,6 +595,94 @@ pub fn max_drawdown_pct_and_duration(equity_curve: &[(TsExchangeNs, i64)]) -> (f
     (max_dd * 100.0, max_dd_dur)
 }
 
+// ── StatsBackend trait (Phase 7.7.3 abstraction) ────────────────────────────
+//
+// Abstracting Sharpe/Sortino computation behind a trait enables future GPU
+// backends to accelerate statistics over large result sets (>10M fills).
+//
+// Design notes (GPU implementation, Phase 7.7.3):
+//   - Offload to GPU via `wgpu` compute shaders or `cuda-rs` when available.
+//   - Input: host-side `&[i64]` PnL series (fixed-point scaled 1e8).
+//   - Data transfer: copy to device buffer, run reduction kernel, copy scalar result back.
+//   - Break-even point (empirical estimate): ~10M fills for wgpu (PCIe 4.0 bandwidth).
+//   - Shader: parallel Welford accumulation with tree reduction per warp.
+//   - ROI: estimated 10–100× speedup for datasets >10M fills.
+//   - Build complexity: adds `wgpu` + WGSL shader asset; gate behind `gpu-stats` feature.
+//
+// To add a GPU backend:
+//   1. Enable `gpu-stats` feature in Cargo.toml.
+//   2. Implement `StatsBackend` for your `GpuStatsBackend` struct.
+//   3. Pass the backend to `calculate_stats_with_backend()`.
+
+/// Abstraction over statistics computation backends (CPU, GPU).
+///
+/// The default backend (`CpuStatsBackend`) uses the existing SIMD + Rayon
+/// parallel implementation.  An optional GPU backend can be plugged in when
+/// the `gpu-stats` feature is enabled and the dataset exceeds ~10M fills.
+///
+/// The `Send + Sync` supertrait bounds allow `Box<dyn StatsBackend>` to be
+/// moved into and shared across rayon worker threads in parameter sweeps.
+pub trait StatsBackend: Send + Sync {
+    /// Compute the annualised Sharpe ratio from a fixed-point PnL series.
+    ///
+    /// `pnl` values are in the same fixed-point scale as [`FixedPoint`] (1e8).
+    /// Returns 0.0 for series with fewer than 2 elements or zero variance.
+    fn sharpe(&self, pnl: &[i64]) -> f64;
+
+    /// Compute the Sortino ratio from a fixed-point PnL series.
+    ///
+    /// Target return is 0.  Returns 0.0 if downside deviation is zero.
+    fn sortino(&self, pnl: &[i64]) -> f64;
+}
+
+/// CPU backend: delegates to the existing SIMD + Rayon implementations.
+pub struct CpuStatsBackend;
+
+impl StatsBackend for CpuStatsBackend {
+    fn sharpe(&self, pnl: &[i64]) -> f64 {
+        sharpe_ratio_from_pnl_series_parallel(pnl)
+    }
+
+    fn sortino(&self, pnl: &[i64]) -> f64 {
+        sortino_ratio_from_pnl_series_parallel(pnl)
+    }
+}
+
+/// GPU backend stub — not yet implemented.
+///
+/// Enable the `gpu-stats` feature and implement `StatsBackend` here to
+/// offload Sharpe/Sortino/equity-curve computation to a wgpu compute shader
+/// for datasets exceeding 10M fills.  See the module-level design notes above.
+#[cfg(feature = "gpu-stats")]
+pub struct GpuStatsBackend {
+    _private: (),
+}
+
+#[cfg(feature = "gpu-stats")]
+impl GpuStatsBackend {
+    /// Create a GPU backend.  Returns `None` if no compatible GPU is available.
+    #[must_use]
+    pub fn new() -> Option<Self> {
+        // TODO: initialise wgpu adapter, device, queue.
+        // Return None until a real GPU device can be acquired.
+        None
+    }
+}
+
+#[cfg(feature = "gpu-stats")]
+impl StatsBackend for GpuStatsBackend {
+    fn sharpe(&self, pnl: &[i64]) -> f64 {
+        // TODO: copy pnl to GPU buffer, run Welford reduction shader, return result.
+        // Fallback to CPU until implemented.
+        CpuStatsBackend.sharpe(pnl)
+    }
+
+    fn sortino(&self, pnl: &[i64]) -> f64 {
+        // TODO: copy pnl to GPU buffer, run downside-deviation shader, return result.
+        CpuStatsBackend.sortino(pnl)
+    }
+}
+
 pub fn sharpe_ratio_from_pnl_series(pnl: &[i64]) -> f64 {
     let n = pnl.len();
     if n < 2 {
@@ -799,6 +887,73 @@ pub fn full_pnl_history(trade_log: &TradeLog) -> Vec<(TsExchangeNs, i64)> {
     }
     // Return clone of full history.
     trade_log.pnl_history().to_vec()
+}
+
+/// Compute basic stats using a pluggable `StatsBackend` for Sharpe/Sortino.
+///
+/// Use this entry point when you want to substitute a GPU backend for large
+/// datasets (>10M fills).  For typical backtests, prefer [`calculate_stats`]
+/// which selects the best CPU path automatically.
+pub fn calculate_stats_with_backend(
+    trade_log: &TradeLog,
+    backend: &dyn StatsBackend,
+) -> BacktestStats {
+    let inc = trade_log.incremental_stats();
+    if trade_log.mode() == TradeLogMode::None {
+        return BacktestStats::default();
+    }
+
+    let total_trades = inc.total_trades;
+    let win_rate = if inc.closed_trades > 0 {
+        inc.win_count as f64 / inc.closed_trades as f64
+    } else {
+        0.0
+    };
+    let profit_factor = if inc.gross_loss < 0 {
+        inc.gross_profit as f64 / (-inc.gross_loss) as f64
+    } else if inc.gross_profit > 0 {
+        f64::INFINITY
+    } else {
+        0.0
+    };
+
+    let pnl_vec: Vec<i64> = trade_log
+        .pnl_history()
+        .iter()
+        .map(|&(_, pnl)| pnl)
+        .collect();
+    let sharpe = backend.sharpe(&pnl_vec);
+    let sortino = backend.sortino(&pnl_vec);
+
+    let max_dd_pct = inc.max_drawdown_pct;
+    let max_dd_dur = inc.max_drawdown_duration;
+    let calmar = if max_dd_pct > 0.0 {
+        let pnl_units = inc.total_pnl as f64 / FixedPoint::SCALE as f64;
+        pnl_units / (max_dd_pct / 100.0)
+    } else {
+        0.0
+    };
+    let avg_trade_pnl = if inc.closed_trades > 0 {
+        inc.total_pnl / inc.closed_trades as i64
+    } else {
+        0
+    };
+
+    BacktestStats {
+        total_trades,
+        win_rate,
+        profit_factor,
+        sharpe_ratio: sharpe,
+        sortino_ratio: sortino,
+        max_drawdown: max_dd_pct,
+        max_drawdown_duration: max_dd_dur,
+        calmar_ratio: calmar,
+        total_pnl: inc.total_pnl,
+        avg_trade_pnl,
+        avg_holding_period: inc.avg_holding_period(),
+        total_fees_paid: inc.total_fees_paid,
+        killed: false,
+    }
 }
 
 /// Compute basic stats from fills and PnL events (e.g. funding).
@@ -1480,6 +1635,99 @@ mod tests {
             "Sortino mismatch: scalar={}, parallel={}",
             scalar_sortino,
             parallel_sortino
+        );
+    }
+
+    // ── StatsBackend trait tests ─────────────────────────────────────────────
+
+    #[test]
+    fn cpu_stats_backend_sharpe_matches_standalone_fn() {
+        let pnl: Vec<i64> = (1..=100).map(|i| i * 1_000_000).collect();
+        let backend = CpuStatsBackend;
+        let expected = sharpe_ratio_from_pnl_series_parallel(&pnl);
+        assert!(
+            (backend.sharpe(&pnl) - expected).abs() < 1e-12,
+            "CpuStatsBackend::sharpe diverged from standalone fn"
+        );
+    }
+
+    #[test]
+    fn cpu_stats_backend_sortino_matches_standalone_fn() {
+        let pnl: Vec<i64> = (1..=100).map(|i| (i - 50) * 1_000_000).collect();
+        let backend = CpuStatsBackend;
+        let expected = sortino_ratio_from_pnl_series_parallel(&pnl);
+        assert!(
+            (backend.sortino(&pnl) - expected).abs() < 1e-12,
+            "CpuStatsBackend::sortino diverged from standalone fn"
+        );
+    }
+
+    #[test]
+    fn cpu_stats_backend_returns_zero_for_empty_series() {
+        let backend = CpuStatsBackend;
+        assert_eq!(backend.sharpe(&[]), 0.0);
+        assert_eq!(backend.sortino(&[]), 0.0);
+    }
+
+    /// Verify the trait can be used as a dynamic dispatch object.
+    #[test]
+    fn stats_backend_trait_object_dispatch_works() {
+        let backend: Box<dyn StatsBackend> = Box::new(CpuStatsBackend);
+        let pnl = vec![100_000_000i64, 200_000_000, -50_000_000];
+        let _ = backend.sharpe(&pnl);
+        let _ = backend.sortino(&pnl);
+    }
+
+    /// Verify that `Box<dyn StatsBackend>` satisfies Send + Sync so it can be
+    /// moved into rayon threads in parameter sweeps.
+    #[test]
+    fn stats_backend_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Box<dyn StatsBackend>>();
+        assert_send_sync::<CpuStatsBackend>();
+    }
+
+    /// `calculate_stats_with_backend` must produce results equivalent to
+    /// `calculate_stats` when using the `CpuStatsBackend`.
+    #[test]
+    fn calculate_stats_with_backend_matches_calculate_stats() {
+        let mut log = TradeLog::new(TradeLogMode::All);
+        // Record two fills: buy then sell round-trip.
+        log.push_fill(TradeFill {
+            ts_exchange: 1_000,
+            order_id: 1,
+            price: 100_000_000_000,
+            qty: 100_000_000,
+            fee: 100_000,
+            symbol_id: 1,
+            side: Side::Buy,
+            is_taker: false,
+        });
+        log.push_fill(TradeFill {
+            ts_exchange: 2_000,
+            order_id: 2,
+            price: 110_000_000_000,
+            qty: 100_000_000,
+            fee: 110_000,
+            symbol_id: 1,
+            side: Side::Sell,
+            is_taker: true,
+        });
+
+        let expected = calculate_stats(&log);
+        let backend = CpuStatsBackend;
+        let actual = calculate_stats_with_backend(&log, &backend);
+
+        assert_eq!(actual.total_trades, expected.total_trades);
+        assert!(
+            (actual.sharpe_ratio - expected.sharpe_ratio).abs() < 1e-9,
+            "sharpe mismatch: with_backend={} vs calculate_stats={}",
+            actual.sharpe_ratio,
+            expected.sharpe_ratio
+        );
+        assert!(
+            (actual.sortino_ratio - expected.sortino_ratio).abs() < 1e-9,
+            "sortino mismatch"
         );
     }
 }

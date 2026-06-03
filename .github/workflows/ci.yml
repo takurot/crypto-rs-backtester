@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -26,11 +26,20 @@ jobs:
       - name: cargo fmt (check)
         run: cargo fmt --all -- --check
 
-      - name: cargo test (core)
+      - name: cargo test (core, default features)
         run: cargo test -p backtester-core
+
+      - name: cargo test (core, concurrent-sweeps feature)
+        run: cargo test -p backtester-core --features concurrent-sweeps
+
+      - name: cargo test (core, all optional features)
+        run: cargo test -p backtester-core --features "concurrent-sweeps,numa,gpu-stats"
 
       - name: cargo clippy (workspace)
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo clippy (concurrent-sweeps feature)
+        run: cargo clippy -p backtester-core --features concurrent-sweeps -- -D warnings
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@v2
@@ -40,6 +49,14 @@ jobs:
       - name: cargo audit
         run: cargo audit --deny warnings
 
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19
+
+      - name: cargo deny check
+        run: cargo deny check
+
   python:
     name: Python E2E (${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -48,10 +65,10 @@ jobs:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: "pip"
