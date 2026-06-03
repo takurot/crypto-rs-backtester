@@ -3,9 +3,10 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
 
-use crate::orderbook_l2::OrderBookL2;
+use crate::orderbook_l2::{MarketDepth, OrderBookL2};
+use crate::orderbook_l3::OrderBookL3;
 use crate::queue_model::QueueModel;
-use crate::types::{L2Update, Order, OrderReport, OrderState, OrderType, Side, Tick};
+use crate::types::{L2Update, L3Update, Order, OrderReport, OrderState, OrderType, Side, Tick};
 
 #[derive(Debug, Clone)]
 struct LiveOrder<S> {
@@ -25,6 +26,7 @@ struct LiveOrder<S> {
 #[derive(Debug)]
 pub struct ExchangeSimulator<Q: QueueModel> {
     book: OrderBookL2,
+    book_l3: Option<OrderBookL3>,
     queue_model: Q,
     orders: BTreeMap<u64, LiveOrder<Q::State>>,
     /// Optimization: Index active orders by (price, side) to avoid scanning all orders on every trade.
@@ -35,6 +37,17 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
     pub fn new(queue_model: Q) -> Self {
         Self {
             book: OrderBookL2::new(),
+            book_l3: None,
+            queue_model,
+            orders: BTreeMap::new(),
+            buckets: FxHashMap::default(),
+        }
+    }
+
+    pub fn new_l3(queue_model: Q) -> Self {
+        Self {
+            book: OrderBookL2::new(),
+            book_l3: Some(OrderBookL3::new()),
             queue_model,
             orders: BTreeMap::new(),
             buckets: FxHashMap::default(),
@@ -45,6 +58,12 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
         self.book.apply_l2(update);
     }
 
+    pub fn apply_l3_update(&mut self, update: &L3Update) {
+        if let Some(book_l3) = &mut self.book_l3 {
+            book_l3.apply_l3(update);
+        }
+    }
+
     /// Submit an order to the exchange.
     ///
     /// Returns the generated order_id and transitions the order to `PendingNew`.
@@ -52,7 +71,13 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
         let order_id = order.order_id;
         debug_assert!(order_id != 0, "order_id must be assigned by the engine");
 
-        let queue_state = self.queue_model.register_order(&order, &self.book);
+        let queue_state = if let Some(book_l3) = &self.book_l3 {
+            self.queue_model
+                .register_order(&order, book_l3 as &dyn MarketDepth)
+        } else {
+            self.queue_model
+                .register_order(&order, &self.book as &dyn MarketDepth)
+        };
 
         self.buckets
             .entry((order.price, order.side))
@@ -166,12 +191,20 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
         debug_assert_eq!(o.state, OrderState::PendingNew);
 
         let best = match o.order.side {
-            Side::Buy => self.book.best_ask(),
-            Side::Sell => self.book.best_bid(),
+            Side::Buy => self
+                .book_l3
+                .as_ref()
+                .and_then(|b| b.best_ask())
+                .or_else(|| self.book.best_ask()),
+            Side::Sell => self
+                .book_l3
+                .as_ref()
+                .and_then(|b| b.best_bid())
+                .or_else(|| self.book.best_bid()),
             Side::None => None,
         };
 
-        // Use L2 best price when available; fall back to provided price when book is empty.
+        // Use L3 or L2 best price when available; fall back to provided price when book is empty.
         // i64::MAX as available_qty: fill the entire order with no depth constraint.
         let effective = best.or_else(|| fallback_price.map(|p| (p, i64::MAX)));
 
@@ -586,5 +619,65 @@ mod tests {
         assert_eq!(report.status, OrderState::Rejected);
         assert_eq!(report.last_fill_qty, 0);
         assert!(report.reason.is_some());
+    }
+
+    #[test]
+    fn test_market_buy_uses_l3_book_best_ask() {
+        use crate::orderbook_l3::L3_ADD;
+        use crate::types::L3Update;
+
+        let mut ex = ExchangeSimulator::new_l3(NoopQueue);
+        // Add an ask at price 200 with qty 5 to the L3 book; L2 book is empty.
+        let upd = L3Update {
+            ts_exchange: 1_000,
+            order_id: 42,
+            price: 200,
+            qty: 5,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            side: Side::Sell,
+            action: L3_ADD,
+        };
+        ex.apply_l3_update(&upd);
+
+        let order = market_buy(fixtures::SYMBOL_ID_BTC_USDT, 3);
+        let id = ex.submit_order(order);
+
+        let report = ex
+            .fill_market_immediately(id, None)
+            .expect("fill_market_immediately should succeed");
+
+        assert_eq!(report.status, OrderState::Filled);
+        assert_eq!(report.last_fill_price, 200);
+        assert_eq!(report.last_fill_qty, 3);
+    }
+
+    #[test]
+    fn test_market_sell_uses_l3_book_best_bid() {
+        use crate::orderbook_l3::L3_ADD;
+        use crate::types::L3Update;
+
+        let mut ex = ExchangeSimulator::new_l3(NoopQueue);
+        // Add a bid at price 150 with qty 10 to the L3 book; L2 book is empty.
+        let upd = L3Update {
+            ts_exchange: 1_000,
+            order_id: 99,
+            price: 150,
+            qty: 10,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            side: Side::Buy,
+            action: L3_ADD,
+        };
+        ex.apply_l3_update(&upd);
+
+        let order = market_sell(fixtures::SYMBOL_ID_BTC_USDT, 4);
+        let id = ex.submit_order(order);
+
+        let report = ex
+            .fill_market_immediately(id, None)
+            .expect("fill_market_immediately should succeed");
+
+        assert_eq!(report.status, OrderState::Filled);
+        assert_eq!(report.last_fill_price, 150);
+        assert_eq!(report.last_fill_qty, 4);
     }
 }
