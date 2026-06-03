@@ -1,4 +1,4 @@
-use crate::orderbook_l2::OrderBookL2;
+use crate::orderbook_l2::MarketDepth;
 use crate::types::{Order, Side, Tick};
 
 /// Queue model for simulating passive fill probability / queue position.
@@ -7,7 +7,7 @@ use crate::types::{Order, Side, Tick};
 pub trait QueueModel {
     type State: Clone + Copy + core::fmt::Debug + PartialEq + Eq;
 
-    fn register_order(&mut self, order: &Order, book: &OrderBookL2) -> Self::State;
+    fn register_order(&mut self, order: &Order, book: &dyn MarketDepth) -> Self::State;
 
     fn check_fill(
         &mut self,
@@ -25,7 +25,7 @@ pub struct NoopQueue;
 impl QueueModel for NoopQueue {
     type State = ();
 
-    fn register_order(&mut self, _order: &Order, _book: &OrderBookL2) -> Self::State {
+    fn register_order(&mut self, _order: &Order, _book: &dyn MarketDepth) -> Self::State {
         // unit
     }
 
@@ -57,7 +57,7 @@ pub struct ConservativeQueueState {
 impl QueueModel for ConservativeQueue {
     type State = ConservativeQueueState;
 
-    fn register_order(&mut self, order: &Order, book: &OrderBookL2) -> Self::State {
+    fn register_order(&mut self, order: &Order, book: &dyn MarketDepth) -> Self::State {
         Self::State {
             qty_ahead: book.level_qty(order.side, order.price),
         }
@@ -119,7 +119,7 @@ pub struct VolumeClockQueueState {
 impl QueueModel for VolumeClockQueue {
     type State = VolumeClockQueueState;
 
-    fn register_order(&mut self, order: &Order, book: &OrderBookL2) -> Self::State {
+    fn register_order(&mut self, order: &Order, book: &dyn MarketDepth) -> Self::State {
         Self::State {
             queue_pos: book.level_qty(order.side, order.price),
             cum_volume: 0,
@@ -167,6 +167,62 @@ impl QueueModel for VolumeClockQueue {
         let fill = available.min(remaining_qty).max(0);
         state.claimed = state.claimed.saturating_add(fill);
         fill
+    }
+}
+
+/// L3-exact queue model: uses per-order queue position from an L3 book.
+///
+/// `register_order` queries `book.qty_ahead(order.order_id)` so the initial
+/// position is exact (not conservative). Fill depletion is identical to
+/// `ConservativeQueue`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct L3ExactQueue;
+
+impl QueueModel for L3ExactQueue {
+    type State = ConservativeQueueState;
+
+    fn register_order(&mut self, order: &Order, book: &dyn MarketDepth) -> Self::State {
+        Self::State {
+            qty_ahead: book.qty_ahead(order.side, order.price, order.order_id),
+        }
+    }
+
+    fn check_fill(
+        &mut self,
+        order: &Order,
+        remaining_qty: i64,
+        trade: &Tick,
+        state: &mut Self::State,
+    ) -> i64 {
+        if remaining_qty <= 0 {
+            return 0;
+        }
+        if trade.symbol_id != order.symbol_id {
+            return 0;
+        }
+        if trade.price != order.price {
+            return 0;
+        }
+        if trade.qty <= 0 {
+            return 0;
+        }
+
+        let is_against = matches!(
+            (order.side, trade.side),
+            (Side::Buy, Side::Sell) | (Side::Sell, Side::Buy)
+        );
+        if !is_against {
+            return 0;
+        }
+
+        let mut available = trade.qty;
+        if state.qty_ahead > 0 {
+            let d = state.qty_ahead.min(available);
+            state.qty_ahead -= d;
+            available -= d;
+        }
+
+        available.min(remaining_qty)
     }
 }
 
@@ -236,5 +292,93 @@ mod tests {
             flags: 0x01,
         };
         assert_eq!(qm.check_fill(&order, 2, &t3, &mut state), 2);
+    }
+
+    #[test]
+    fn test_l3_exact_fills_earlier_than_conservative_when_orders_cancelled() {
+        // L3 book: 5 units ahead (some prior orders were cancelled, L3 knows)
+        // L2 book: 10 units ahead (stale — doesn't reflect cancellations)
+        use crate::orderbook_l3::{L3_ADD, L3_DELETE, OrderBookL3};
+        use crate::types::L3Update;
+
+        let mut book_l3 = OrderBookL3::new();
+        // Two orders originally in queue; order 10 gets cancelled before user submits
+        book_l3.apply_l3(&L3Update {
+            ts_exchange: 0,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            order_id: 10,
+            price: 100,
+            qty: 5,
+            side: Side::Buy,
+            action: L3_ADD,
+        });
+        book_l3.apply_l3(&L3Update {
+            ts_exchange: 0,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            order_id: 20,
+            price: 100,
+            qty: 5,
+            side: Side::Buy,
+            action: L3_ADD,
+        });
+        // order 10 is cancelled
+        book_l3.apply_l3(&L3Update {
+            ts_exchange: 0,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            order_id: 10,
+            price: 100,
+            qty: 0,
+            side: Side::Buy,
+            action: L3_DELETE,
+        });
+        // L3 level: only order 20 (qty=5) remains
+        assert_eq!(book_l3.level_qty(Side::Buy, 100), 5);
+
+        let order = Order {
+            order_id: 99, // user's order (not in L3 book)
+            ts_submit: 1_000,
+            seq: 0,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            price: 100,
+            qty: 3,
+        };
+
+        // L3Exact: qty_ahead = 5 (L3 book is accurate)
+        let mut qm_l3 = L3ExactQueue;
+        let mut state_l3 = qm_l3.register_order(&order, &book_l3);
+        assert_eq!(state_l3.qty_ahead, 5);
+
+        // L2 book still shows stale 10 units
+        let mut book_l2 = OrderBookL2::new();
+        book_l2.apply_l2(&fixtures::l2_update(1_000, 0, 100, 10, Side::Buy));
+        let mut qm_c = ConservativeQueue;
+        let mut state_c = qm_c.register_order(&order, &book_l2);
+        assert_eq!(state_c.qty_ahead, 10);
+
+        // Trade of 6 units arrives
+        let trade = Tick {
+            ts_exchange: 2_000,
+            ts_local: 2_000,
+            seq: 1,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            price: 100,
+            qty: 6,
+            side: Side::Sell,
+            flags: 0x01,
+        };
+
+        // L3Exact: qty_ahead=5, trade=6 → 1 unit past queue → fill=1
+        let fill_l3 = qm_l3.check_fill(&order, 3, &trade, &mut state_l3);
+        // Conservative: qty_ahead=10, trade=6 → 0 units past queue → no fill
+        let fill_c = qm_c.check_fill(&order, 3, &trade, &mut state_c);
+
+        assert!(
+            fill_l3 > fill_c,
+            "L3Exact fill ({fill_l3}) must be > Conservative fill ({fill_c})"
+        );
+        assert_eq!(fill_l3, 1);
+        assert_eq!(fill_c, 0);
     }
 }

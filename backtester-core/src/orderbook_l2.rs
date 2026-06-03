@@ -2,6 +2,21 @@ use std::collections::BTreeMap;
 
 use crate::types::{L2Update, Side};
 
+/// Unified interface for L2 and L3 order books.
+///
+/// `QueueModel::register_order` accepts `&dyn MarketDepth` so both book types
+/// can be used without changing the queue model generics.
+pub trait MarketDepth: Send {
+    /// Total resting qty at a price level.
+    fn level_qty(&self, side: Side, price: i64) -> i64;
+
+    /// Qty of resting orders strictly ahead of `order_id` in the queue.
+    ///
+    /// For L2 books (no per-order tracking) this falls back to `level_qty`,
+    /// which is the conservative assumption used by `ConservativeQueue`.
+    fn qty_ahead(&self, side: Side, price: i64, order_id: u64) -> i64;
+}
+
 /// Minimal L2 order book (price level) representation.
 ///
 /// Scaffolding for benches; production semantics will expand in later phases.
@@ -44,6 +59,17 @@ impl OrderBookL2 {
 
     pub fn best_ask(&self) -> Option<(i64, i64)> {
         self.asks.iter().next().map(|(p, q)| (*p, *q))
+    }
+}
+
+impl MarketDepth for OrderBookL2 {
+    fn level_qty(&self, side: Side, price: i64) -> i64 {
+        OrderBookL2::level_qty(self, side, price)
+    }
+
+    fn qty_ahead(&self, side: Side, price: i64, _order_id: u64) -> i64 {
+        // L2 has no per-order tracking: conservative — all level qty is ahead.
+        OrderBookL2::level_qty(self, side, price)
     }
 }
 

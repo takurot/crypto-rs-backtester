@@ -1,4 +1,4 @@
-use crate::types::{FundingEvent, L2Update, Order, OrderReport, Tick, TsSimNs};
+use crate::types::{FundingEvent, L2Update, L3Update, Order, OrderReport, Tick, TsSimNs};
 
 /// Stable identifier for ordering events at the same simulated timestamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -14,6 +14,7 @@ pub enum EventKind {
     /// Feed-delivered tick/trade (strategy-observed).
     TickDelivery(Tick),
     L2Update(L2Update),
+    L3Update(L3Update),
     /// Strategy order request arriving at the exchange.
     Order(Order),
     /// Exchange ACK for a new order (PendingNew -> Open).
