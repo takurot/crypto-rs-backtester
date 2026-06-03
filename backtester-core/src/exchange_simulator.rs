@@ -218,12 +218,20 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
         debug_assert_eq!(o.state, OrderState::PendingNew);
 
         let best = match o.order.side {
-            Side::Buy => self.book.best_ask(),
-            Side::Sell => self.book.best_bid(),
+            Side::Buy => self
+                .book_l3
+                .as_ref()
+                .and_then(|b| b.best_ask())
+                .or_else(|| self.book.best_ask()),
+            Side::Sell => self
+                .book_l3
+                .as_ref()
+                .and_then(|b| b.best_bid())
+                .or_else(|| self.book.best_bid()),
             Side::None => None,
         };
 
-        // Use L2 best price when available; fall back to provided price when book is empty.
+        // Use L3 or L2 best price when available; fall back to provided price when book is empty.
         // i64::MAX as available_qty: fill the entire order with no depth constraint.
         let effective = best.or_else(|| fallback_price.map(|p| (p, i64::MAX)));
 
@@ -635,6 +643,68 @@ mod tests {
         assert_eq!(report.status, OrderState::Rejected);
         assert_eq!(report.last_fill_qty, 0);
         assert!(report.reason.is_some());
+    }
+
+    #[test]
+    fn test_market_buy_uses_l3_book_best_ask() {
+        use crate::orderbook_l3::L3_ADD;
+        use crate::types::L3Update;
+
+        let mut ex = ExchangeSimulator::new_l3(NoopQueue);
+        let upd = L3Update {
+            ts_exchange: 1_000,
+            seq: 0,
+            order_id: 42,
+            price: 200,
+            qty: 5,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            side: Side::Sell,
+            action: L3_ADD,
+        };
+        ex.apply_l3_update(&upd)
+            .expect("apply_l3_update should succeed");
+
+        let order = market_buy(fixtures::SYMBOL_ID_BTC_USDT, 3);
+        let id = ex.submit_order(order);
+
+        let report = ex
+            .fill_market_immediately(id, None)
+            .expect("fill_market_immediately should succeed");
+
+        assert_eq!(report.status, OrderState::Filled);
+        assert_eq!(report.last_fill_price, 200);
+        assert_eq!(report.last_fill_qty, 3);
+    }
+
+    #[test]
+    fn test_market_sell_uses_l3_book_best_bid() {
+        use crate::orderbook_l3::L3_ADD;
+        use crate::types::L3Update;
+
+        let mut ex = ExchangeSimulator::new_l3(NoopQueue);
+        let upd = L3Update {
+            ts_exchange: 1_000,
+            seq: 0,
+            order_id: 99,
+            price: 150,
+            qty: 10,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            side: Side::Buy,
+            action: L3_ADD,
+        };
+        ex.apply_l3_update(&upd)
+            .expect("apply_l3_update should succeed");
+
+        let order = market_sell(fixtures::SYMBOL_ID_BTC_USDT, 4);
+        let id = ex.submit_order(order);
+
+        let report = ex
+            .fill_market_immediately(id, None)
+            .expect("fill_market_immediately should succeed");
+
+        assert_eq!(report.status, OrderState::Filled);
+        assert_eq!(report.last_fill_price, 150);
+        assert_eq!(report.last_fill_qty, 4);
     }
 
     // ── remove_order + on_trade interaction ─────────────────────────────────

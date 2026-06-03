@@ -27,3 +27,12 @@ python/rust_backtester/*.dll
 # Docs
 docs/START.txt
 review/
+
+# Local data and benchmark artifacts
+data/
+benchmark/
+run.log
+resume.txt
+temp/
+deny.toml.bak
+deny.toml.generated
