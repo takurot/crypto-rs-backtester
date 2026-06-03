@@ -661,7 +661,8 @@ mod tests {
             side: Side::Sell,
             action: L3_ADD,
         };
-        ex.apply_l3_update(&upd);
+        ex.apply_l3_update(&upd)
+            .expect("apply_l3_update should succeed");
 
         let order = market_buy(fixtures::SYMBOL_ID_BTC_USDT, 3);
         let id = ex.submit_order(order);
@@ -691,7 +692,8 @@ mod tests {
             side: Side::Buy,
             action: L3_ADD,
         };
-        ex.apply_l3_update(&upd);
+        ex.apply_l3_update(&upd)
+            .expect("apply_l3_update should succeed");
 
         let order = market_sell(fixtures::SYMBOL_ID_BTC_USDT, 4);
         let id = ex.submit_order(order);
