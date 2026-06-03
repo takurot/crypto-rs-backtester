@@ -265,6 +265,7 @@ impl BacktestResult {
         d.set_item("avg_trade_pnl", s.avg_trade_pnl as f64 / scale)?;
         d.set_item("avg_holding_period", s.avg_holding_period)?;
         d.set_item("total_fees_paid", s.total_fees_paid as f64 / scale)?;
+        d.set_item("killed", s.killed)?;
         Ok(d)
     }
 
