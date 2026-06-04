@@ -1,14 +1,31 @@
 # Implementation Playbook (AI Agent)
 
-Use this file as the default execution rules for implementing tasks/PRs in this repository.
+Use this file as the default execution rules for implementing GitHub Issues in this repository.
 
 ## Inputs (What you are given)
-- A PR identifier (e.g., **PR-01**) or a request to implement a subset of tasks.
+- A GitHub Issue number (e.g., **Issue #95**).
+
+## Quick Start — One-Shot Issue Implementation
+
+Paste the following prompt, replacing `<N>` with the Issue number:
+
+```
+Issue #<N> の詳細な実装内容をプランニングし、その後最新の main からブランチを作成し TDD で実装。
+適切な Skills を使う。問題が起きたときは learned にある Skill を参照し過去の事例を探すこと。
+実装が完了したらサブエージェントでコードレビューを実施し指定内容に対処。
+テストと E2E テストは必ず実行し、十分な検証を行うこと。
+その後コミット・プッシュして PR を作成。CI がオールグリーンになるまで対処。
+実装内容を確認し、Issue に記載されている内容が対処されていることを評価し、
+問題があれば問題点に対しプランニングし実装と検証を繰り返す。問題なければマージ。
+```
+
+The agent will automatically follow the full workflow described in this file.
 
 ## Primary References (Always read these first)
 - **Specification**: `docs/SPEC.md`
 - **Implementation tasks (incl. suggested tests/bench names)**: `docs/PLAN.md`
 - **This playbook (process & rules)**: `docs/PROMPT.md`
+- **GitHub Issue**: `gh issue view <N>` — fetch the full issue body, acceptance criteria, and comments before starting.
 
 ---
 
@@ -41,14 +58,21 @@ Use this file as the default execution rules for implementing tasks/PRs in this 
 
 ## Standard Implementation Workflow
 
-### 0) Pre‑flight
-- Read `docs/SPEC.md` and the relevant section(s) in `docs/PLAN.md`.
-- Clarify scope: what exactly is in/out for the requested PR/tasks.
-- Create a short checklist of tasks you will complete (map to `docs/PLAN.md`).
+### 0) Pre‑flight & Planning
+- Fetch the issue: `gh issue view <N>` — read the full body, acceptance criteria, and all comments.
+- Read `docs/SPEC.md` and any relevant section(s) in `docs/PLAN.md`.
+- Run `/plan` skill (or use the **planner** agent) to produce a concrete task list before touching code.
+- Clarify scope: what exactly is in/out for this issue.
+- If the issue references past work, check `learned` Skills (`/instinct-status`) and project memory for applicable patterns or pitfalls.
 
 ### 1) Branching
-- Branch name: `feature/<pr-id>-<short-description>`
-  - Example: `feature/pr-02-polars-integration`
+- Fetch and reset to latest `main` first:
+  ```bash
+  git fetch origin
+  git checkout main && git reset --hard origin/main
+  ```
+- Branch name: `feature/issue-<N>-<short-description>`
+  - Example: `feature/issue-95-l3-codex-fixes`
 - Branch off `main`.
 
 ### 2) Environment Setup (macOS/Linux)
@@ -115,17 +139,38 @@ ruff format python/
 - Update `docs/PLAN.md` checkboxes and add notes for any newly discovered follow‑ups/risks.
 - Only update `docs/SPEC.md` if you are changing the intended behavior/contract.
 
-### 8) Commits & PR
-- Commit message format: `<type>(<scope>): <description>`
+### 8) Code Review (Sub-agent)
+- After all tests pass, invoke the **rust-reviewer** sub-agent (or `/rust-review` skill) on the diff.
+- Address every CRITICAL and HIGH finding before proceeding.
+- Fix MEDIUM findings where straightforward.
+
+### 9) Commits & PR
+- Commit message format: `<type>(<scope>): <description> (#<N>)`
   - types: `feat`, `fix`, `test`, `docs`, `refactor`, `chore`, `ci`
-  - example: `test(engine): add no-lookahead regression test`
+  - example: `fix(engine): correct fill_market_immediately L3 fallback (#95)`
 - Keep commits small and logically separated.
 
-If GitHub CLI is used:
+Create the PR and link it to the issue:
 ```bash
-gh pr create --title "<PR-ID>: <Title>" --body "<Description>"
-gh pr checks
+gh pr create \
+  --title "fix: <short description> (#<N>)" \
+  --body "Closes #<N>\n\n## Summary\n- …\n\n## Test plan\n- [ ] cargo test\n- [ ] pytest python/tests"
 ```
+
+Wait for CI and handle failures:
+```bash
+gh pr checks --watch
+# If red: read logs, fix, push again
+```
+
+### 10) Issue Verification & Merge
+- Re-read the original issue (`gh issue view <N>`) and confirm every acceptance criterion is met.
+- If any criterion is unmet, return to step 0 (re-plan for that gap) and iterate.
+- When all criteria are met and CI is green, merge via squash:
+  ```bash
+  gh pr merge --squash --auto
+  ```
+- Delete the feature branch after merge.
 
 ---
 
@@ -158,20 +203,28 @@ For look-ahead tests, set a constant feed latency and assert the strategy’s ob
 ---
 
 ## Checklist (Before you call a PR “done”)
+- [ ] Issue body re-read; all acceptance criteria addressed.
 - [ ] Implemented the requested tasks with minimal diffs.
 - [ ] Added/updated tests (Rust and/or Python) with deterministic assertions.
 - [ ] Verified no look‑ahead bias via tests (if time handling was touched).
 - [ ] All tests pass (`cargo test`, plus `pytest` if present).
 - [ ] Benchmarks checked when performance-sensitive code changed.
 - [ ] `fmt/clippy` (and `ruff` if present) are clean.
+- [ ] Code review sub-agent run; CRITICAL/HIGH findings addressed.
+- [ ] CI green (`gh pr checks`).
 - [ ] `docs/PLAN.md` updated with progress and notes.
+- [ ] Feature branch deleted after merge.
 
 ---
 
-## Agentic Workflow
+## Agentic Workflow (Issue-centric)
 
-1. **Consultation**: Refer to `CODEX_CLI.md` and discuss implementation details/strategy with `codex`.
-2. **Implementation**: Create a feature branch and develop using TDD (Test-Driven Development).
-3. **Benchmarking**: After implementation, refer to `README.md` to run benchmarks and save results in `benchmarks`.
-4. **Pull Request**: Commit and push changes, then create a PR.
-5. **Code Review**: After creating the PR, refer to `CODEX_CLI.md` to request a code review from `codex`.
+1. **Fetch Issue** — `gh issue view <N>` to load acceptance criteria into context.
+2. **Consult past work** — run `/instinct-status` and check `learned` Skills for any prior patterns matching this issue's domain.
+3. **Plan** — use `/plan` skill or **planner** agent; produce a task list before touching code.
+4. **Branch** — `git checkout -b feature/issue-<N>-<short-description>` from latest `main`.
+5. **TDD** — write failing tests, implement, refactor; repeat until green.
+6. **Code review** — invoke **rust-reviewer** sub-agent (or `/rust-review`); address findings.
+7. **PR** — `gh pr create …`; monitor CI with `gh pr checks --watch`.
+8. **Verify & merge** — re-read the issue, confirm all criteria met, then `gh pr merge --squash --auto`.
+9. **Clean up** — delete the feature branch.
