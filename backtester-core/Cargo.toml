@@ -2,7 +2,7 @@
 name = "backtester-core"
 version = "0.1.2"
 edition = "2024"
-license = "MIT"
+license = "Apache-2.0"
 
 [features]
 # Enable DashMap-backed concurrent bucket index for parallel parameter sweeps.
