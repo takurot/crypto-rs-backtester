@@ -10,13 +10,13 @@ Use this file as the default execution rules for implementing GitHub Issues in t
 Paste the following prompt, replacing `<N>` with the Issue number:
 
 ```
-Issue #<N> の詳細な実装内容をプランニングし、その後最新の main からブランチを作成し TDD で実装。
-適切な Skills を使う。問題が起きたときは learned にある Skill を参照し過去の事例を探すこと。
-実装が完了したらサブエージェントでコードレビューを実施し指定内容に対処。
-テストと E2E テストは必ず実行し、十分な検証を行うこと。
-その後コミット・プッシュして PR を作成。CI がオールグリーンになるまで対処。
-実装内容を確認し、Issue に記載されている内容が対処されていることを評価し、
-問題があれば問題点に対しプランニングし実装と検証を繰り返す。問題なければマージ。
+Plan the detailed implementation for Issue #<N>, then create a branch from the latest main and implement using TDD.
+Use appropriate Skills. When problems arise, check learned Skills for past examples.
+After implementation, run a sub-agent code review and address all findings.
+Always run tests and E2E tests for sufficient verification.
+Then commit, push, and create a PR. Handle failures until CI is all-green.
+Review the implementation and evaluate whether all items in the Issue are addressed.
+If there are gaps, plan and re-implement/verify for each gap. If no gaps, merge.
 ```
 
 The agent will automatically follow the full workflow described in this file.
