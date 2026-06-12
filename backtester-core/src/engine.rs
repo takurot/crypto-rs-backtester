@@ -786,17 +786,27 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                 }
             }
             EventKind::Funding(event) => {
+                // Prefer the last observed trade price; if no trade has occurred yet for
+                // this symbol, fall back to the order book mid-price. If neither is
+                // available, skip recording funding PnL rather than silently treating
+                // the mark price as 0 (see issue #99).
                 let mark_price = self
                     .truth_last_trade_by_symbol
                     .get(&event.symbol_id)
                     .map(|t| t.price)
-                    .unwrap_or(0);
-                let pnl = self.account.apply_funding(&event, mark_price);
-                self.trade_log.push_pnl_event(crate::stats::PnlEvent {
-                    ts_exchange: event.ts_exchange,
-                    pnl,
-                });
-                self.risk_guard.update_pnl(pnl);
+                    .or_else(|| {
+                        self.exchanges
+                            .get(&event.symbol_id)
+                            .and_then(|ex| ex.mark_price())
+                    });
+                if let Some(mark_price) = mark_price {
+                    let pnl = self.account.apply_funding(&event, mark_price);
+                    self.trade_log.push_pnl_event(crate::stats::PnlEvent {
+                        ts_exchange: event.ts_exchange,
+                        pnl,
+                    });
+                    self.risk_guard.update_pnl(pnl);
+                }
 
                 match self.config.mode {
                     EngineMode::Tick => {
@@ -1160,6 +1170,91 @@ mod tests {
 
         // Notional=100.00, rate=0.0001 => pay 0.01
         assert_eq!(eng.account().total_funding_pnl(), -1_000_000);
+    }
+
+    #[test]
+    fn test_funding_uses_order_book_mid_price_when_no_trade_recorded() {
+        // Regression test for issue #99: a funding event for a symbol that has
+        // never had a `Tick` (so `truth_last_trade_by_symbol` is empty) must
+        // derive its mark price from the order book mid-price, not from a
+        // silent 0 fallback.
+        let config = EngineConfig {
+            mode: EngineMode::Tick,
+            seed: 42,
+            ..Default::default()
+        };
+        let strategy = RecordingStrategy::default();
+        let latency_model = ConstantLatency {
+            feed_latency_ns: 0,
+            order_latency_ns: 0,
+        };
+        let mut eng = Engine::new(ConservativeQueue, strategy, config, latency_model);
+        let sid = fixtures::SYMBOL_ID_BTC_USDT;
+
+        // Seed an L2 book with bid=99.00 / ask=101.00 (mid=100.00). No `Tick`
+        // is ever pushed, so `truth_last_trade_by_symbol` stays empty.
+        let l2_bid = fixtures::l2_update(500, 0, 99_00000000, 5_00000000, Side::Buy);
+        let l2_ask = fixtures::l2_update(500, 1, 101_00000000, 5_00000000, Side::Sell);
+        eng.push_event(500, EventKind::L2Update(l2_bid));
+        eng.push_event(500, EventKind::L2Update(l2_ask));
+        eng.step().expect("engine step").expect("l2 bid");
+        eng.step().expect("engine step").expect("l2 ask");
+        assert!(!eng.truth_last_trade_by_symbol.contains_key(&sid));
+
+        // Directly open a long position of 1.0 (bypassing the trade path, which
+        // would otherwise populate `truth_last_trade_by_symbol`).
+        let order = fixtures::order_limit(1, 0, 0, 100_00000000, 1_00000000, Side::Buy);
+        eng.account.on_fill(&order, 1_00000000, 100_00000000);
+        assert_eq!(eng.account().position_qty(sid), 1_00000000);
+
+        // Funding at rate=0.0001 against the book mid-price of 100.00.
+        let f = FundingEvent {
+            ts_exchange: 1_000,
+            symbol_id: sid,
+            rate: 10_000,
+        };
+        eng.push_event(1_000, EventKind::Funding(f));
+        eng.step().expect("engine step").expect("funding");
+
+        // Notional=100.00, rate=0.0001 => pay 0.01, derived from the book mid-price.
+        assert_eq!(eng.account().total_funding_pnl(), -1_000_000);
+    }
+
+    #[test]
+    fn test_funding_skipped_when_no_price_information_available() {
+        // Regression test for issue #99: when neither a trade nor order book
+        // data exists for a symbol, the engine must skip recording funding PnL
+        // rather than logging a fabricated zero cashflow.
+        let config = EngineConfig {
+            mode: EngineMode::Tick,
+            seed: 42,
+            ..Default::default()
+        };
+        let strategy = RecordingStrategy::default();
+        let latency_model = ConstantLatency {
+            feed_latency_ns: 0,
+            order_latency_ns: 0,
+        };
+        let mut eng = Engine::new(ConservativeQueue, strategy, config, latency_model);
+        let sid = fixtures::SYMBOL_ID_BTC_USDT;
+
+        // Directly open a position with no preceding trade or L2/L3 data at all.
+        let order = fixtures::order_limit(1, 0, 0, 100_00000000, 1_00000000, Side::Buy);
+        eng.account.on_fill(&order, 1_00000000, 100_00000000);
+        assert_eq!(eng.account().position_qty(sid), 1_00000000);
+
+        let f = FundingEvent {
+            ts_exchange: 1_000,
+            symbol_id: sid,
+            rate: 10_000,
+        };
+        eng.push_event(1_000, EventKind::Funding(f));
+        eng.step().expect("engine step").expect("funding");
+
+        // No mark price was available, so no PnL event was recorded at all
+        // (as opposed to a fabricated zero-value entry).
+        assert!(eng.trade_log().pnl_history().is_empty());
+        assert_eq!(eng.account().total_funding_pnl(), 0);
     }
 
     #[test]

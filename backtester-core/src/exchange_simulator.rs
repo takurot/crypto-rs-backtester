@@ -73,6 +73,24 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
         self.book.apply_l2(update);
     }
 
+    /// Derive a mark price from the current order book mid-price.
+    ///
+    /// Uses the L3 book when available, otherwise the L2 book. Falls back to
+    /// whichever side has quotes if only one side of the book is populated.
+    /// Returns `None` if neither side has any quotes.
+    pub fn mark_price(&self) -> Option<i64> {
+        let (best_bid, best_ask) = match &self.book_l3 {
+            Some(book_l3) => (book_l3.best_bid(), book_l3.best_ask()),
+            None => (self.book.best_bid(), self.book.best_ask()),
+        };
+        match (best_bid, best_ask) {
+            (Some((bid, _)), Some((ask, _))) => Some(bid.saturating_add(ask) / 2),
+            (Some((bid, _)), None) => Some(bid),
+            (None, Some((ask, _))) => Some(ask),
+            (None, None) => None,
+        }
+    }
+
     pub fn apply_l3_update(&mut self, update: &L3Update) -> Result<(), &'static str> {
         for live in self.orders.values_mut() {
             if matches!(
