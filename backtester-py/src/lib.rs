@@ -11,9 +11,8 @@ use arrow::array::{
     ArrayRef, BooleanBuilder, Int8Builder, Int64Builder, UInt32Builder, UInt64Builder,
 };
 use arrow::datatypes::{DataType, Field, Schema};
-use arrow::pyarrow::ToPyArrow;
 use arrow::record_batch::RecordBatch;
-use arrow_utils::get_arrow_stream;
+use arrow_utils::{array_data_to_pyarrow, get_arrow_stream, record_batch_to_pyarrow};
 use backtester_core::engine::{EngineConfig, EngineError, EngineMode, Strategy as CoreStrategy};
 use backtester_core::l3_source::{ArrowL3Source, L3Source};
 use backtester_core::latency_model::{ConstantLatency, LogNormalJitter};
@@ -28,7 +27,7 @@ use pyo3::types::{PyAny, PyDict, PyList, PyModule};
 use rayon::prelude::*;
 use std::sync::Arc;
 
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyTick {
     #[pyo3(get)]
@@ -51,8 +50,8 @@ pub struct PyTick {
 
 #[pymethods]
 impl PyTick {
-    fn __getitem__(&self, key: &str) -> PyResult<PyObject> {
-        Python::with_gil(|py| match key {
+    fn __getitem__(&self, key: &str) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| match key {
             "ts_exchange" => Ok(self.ts_exchange.into_pyobject(py)?.into_any().unbind()),
             "ts_local" => Ok(self.ts_local.into_pyobject(py)?.into_any().unbind()),
             "seq" => Ok(self.seq.into_pyobject(py)?.into_any().unbind()),
@@ -75,7 +74,7 @@ impl PyTick {
     }
 }
 
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyOrderReport {
     #[pyo3(get)]
@@ -98,8 +97,8 @@ pub struct PyOrderReport {
 
 #[pymethods]
 impl PyOrderReport {
-    fn __getitem__(&self, key: &str) -> PyResult<PyObject> {
-        Python::with_gil(|py| match key {
+    fn __getitem__(&self, key: &str) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| match key {
             "order_id" => Ok(self.order_id.into_pyobject(py)?.into_any().unbind()),
             "symbol_id" => Ok(self.symbol_id.into_pyobject(py)?.into_any().unbind()),
             "status" => Ok(self.status.clone().into_pyobject(py)?.into_any().unbind()),
@@ -128,8 +127,8 @@ impl PyOrderReport {
 
     /// Dict-like get method for backward compatibility
     #[pyo3(signature = (key, default=None))]
-    fn get(&self, key: &str, default: Option<PyObject>) -> PyResult<PyObject> {
-        Python::with_gil(|py| match key {
+    fn get(&self, key: &str, default: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| match key {
             "order_id" => Ok(self.order_id.into_pyobject(py)?.into_any().unbind()),
             "symbol_id" => Ok(self.symbol_id.into_pyobject(py)?.into_any().unbind()),
             "status" => Ok(self.status.clone().into_pyobject(py)?.into_any().unbind()),
@@ -143,7 +142,7 @@ impl PyOrderReport {
     }
 }
 
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 pub struct Backtester {
     data: Py<PyAny>,
     feed_latency_ns: i64,
@@ -178,7 +177,7 @@ pub struct Backtester {
     l3_data: Option<Py<PyAny>>,
 }
 
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 pub struct BacktestResult {
     trades: Vec<TradeFill>,
     stats: BacktestStats,
@@ -234,14 +233,26 @@ impl BacktestResult {
         let is_taker_array: ArrayRef = Arc::new(is_taker_builder.finish());
 
         let d = PyDict::new(py);
-        d.set_item("ts_exchange", ts_array.to_data().to_pyarrow(py)?)?;
-        d.set_item("symbol_id", symbol_array.to_data().to_pyarrow(py)?)?;
-        d.set_item("order_id", order_array.to_data().to_pyarrow(py)?)?;
-        d.set_item("side", side_array.to_data().to_pyarrow(py)?)?;
-        d.set_item("price", price_array.to_data().to_pyarrow(py)?)?;
-        d.set_item("qty", qty_array.to_data().to_pyarrow(py)?)?;
-        d.set_item("fee", fee_array.to_data().to_pyarrow(py)?)?;
-        d.set_item("is_taker", is_taker_array.to_data().to_pyarrow(py)?)?;
+        d.set_item(
+            "ts_exchange",
+            array_data_to_pyarrow(py, &ts_array.to_data())?,
+        )?;
+        d.set_item(
+            "symbol_id",
+            array_data_to_pyarrow(py, &symbol_array.to_data())?,
+        )?;
+        d.set_item(
+            "order_id",
+            array_data_to_pyarrow(py, &order_array.to_data())?,
+        )?;
+        d.set_item("side", array_data_to_pyarrow(py, &side_array.to_data())?)?;
+        d.set_item("price", array_data_to_pyarrow(py, &price_array.to_data())?)?;
+        d.set_item("qty", array_data_to_pyarrow(py, &qty_array.to_data())?)?;
+        d.set_item("fee", array_data_to_pyarrow(py, &fee_array.to_data())?)?;
+        d.set_item(
+            "is_taker",
+            array_data_to_pyarrow(py, &is_taker_array.to_data())?,
+        )?;
         d.set_item("_len", n)?;
         Ok(d)
     }
@@ -287,8 +298,14 @@ impl BacktestResult {
         let equity_array: ArrayRef = Arc::new(equity_builder.finish());
 
         let d = PyDict::new(py);
-        d.set_item("ts_exchange", ts_array.to_data().to_pyarrow(py)?)?;
-        d.set_item("equity", equity_array.to_data().to_pyarrow(py)?)?;
+        d.set_item(
+            "ts_exchange",
+            array_data_to_pyarrow(py, &ts_array.to_data())?,
+        )?;
+        d.set_item(
+            "equity",
+            array_data_to_pyarrow(py, &equity_array.to_data())?,
+        )?;
         d.set_item("_len", n)?;
         Ok(d)
     }
@@ -331,14 +348,14 @@ impl Backtester {
             None => None,
             Some(ref py_map) => {
                 let bound = py_map.bind(py);
-                let dict = bound.downcast::<PyDict>().map_err(|_| {
+                let dict = bound.cast::<PyDict>().map_err(|_| {
                     pyo3::exceptions::PyTypeError::new_err("symbol_map must be a dict")
                 })?;
 
                 // Extract data keys to check coverage.
                 let data_bound = data.bind(py);
                 let data_dict = data_bound
-                    .downcast::<PyDict>()
+                    .cast::<PyDict>()
                     .map_err(|_| pyo3::exceptions::PyTypeError::new_err("data must be a dict"))?;
 
                 let mut map: HashMap<String, u32> = HashMap::new();
@@ -492,7 +509,7 @@ impl Backtester {
 
         // Zero-copy ingestion path
         let data_any = self.data.bind(py);
-        let data_dict = data_any.downcast::<PyDict>()?;
+        let data_dict = data_any.cast::<PyDict>()?;
 
         let mut keys: Vec<String> = Vec::with_capacity(data_dict.len());
         for (k, _v) in data_dict.iter() {
@@ -602,7 +619,7 @@ impl Backtester {
         let l_std = self.latency_std_ns;
 
         // 3. Parallel execution releasing GIL.
-        let results: PyResult<Vec<BacktestResult>> = py.allow_threads(move || {
+        let results: PyResult<Vec<BacktestResult>> = py.detach(move || {
             strategies
                 .into_par_iter()
                 .zip(configs.into_par_iter())
@@ -688,7 +705,7 @@ impl Backtester {
 
         let stream_bound = stream.bind(py);
 
-        if let Ok(streams_dict) = stream_bound.downcast::<PyDict>() {
+        if let Ok(streams_dict) = stream_bound.cast::<PyDict>() {
             // Multi-symbol path: stream is a {symbol_name: arrow_stream} dict.
             // Note: We do NOT use AsyncBatchIter here — PyArrow-backed streams must be
             // consumed on the thread that holds the GIL.
@@ -814,7 +831,7 @@ fn attach_l3_sources(
     };
     let l3_any = l3_data.bind(py);
     let l3_dict = l3_any
-        .downcast::<PyDict>()
+        .cast::<PyDict>()
         .map_err(|_| pyo3::exceptions::PyTypeError::new_err("l3_data must be a dict"))?;
 
     for key in keys {
@@ -850,7 +867,7 @@ fn single_l3_key(py: Python<'_>, l3_data: Option<&Py<PyAny>>) -> PyResult<Vec<St
     };
     let l3_any = l3_data.bind(py);
     let l3_dict = l3_any
-        .downcast::<PyDict>()
+        .cast::<PyDict>()
         .map_err(|_| pyo3::exceptions::PyTypeError::new_err("l3_data must be a dict"))?;
     let mut keys: Vec<String> = l3_dict
         .iter()
@@ -867,7 +884,7 @@ fn single_l3_key(py: Python<'_>, l3_data: Option<&Py<PyAny>>) -> PyResult<Vec<St
 
 fn checksum_from_polars_data(py: Python<'_>, data: &Py<PyAny>) -> PyResult<i64> {
     let data_any = data.bind(py);
-    let data_dict = data_any.downcast::<PyDict>()?;
+    let data_dict = data_any.cast::<PyDict>()?;
 
     let mut checksum: i128 = 0;
     for (k_obj, lf) in data_dict.iter() {
@@ -1052,7 +1069,7 @@ enum PyCommand {
     },
 }
 
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Debug)]
 struct PyContext {
     ts_local: i64,
@@ -1111,7 +1128,7 @@ impl CoreStrategy for PyStrategy {
         tick: &Tick,
         _ctx: &mut backtester_core::Context<'_>,
     ) -> Result<(), Self::Error> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let tick_obj = tick_to_pyobject(py, tick)?;
             let strategy = self.obj.bind(py);
 
@@ -1143,7 +1160,7 @@ impl CoreStrategy for PyStrategy {
         report: &OrderReport,
         _ctx: &mut backtester_core::Context<'_>,
     ) -> Result<(), Self::Error> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let report_obj = order_report_to_pyobject(py, report)?;
             let strategy = self.obj.bind(py);
 
@@ -1169,7 +1186,7 @@ impl CoreStrategy for PyStrategy {
     }
 
     fn on_ticks(&mut self, ticks: &[Tick], ctx: &mut CoreContext<'_>) -> Result<(), Self::Error> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let strategy = self.obj.bind(py);
             let py_ctx = Py::new(
                 py,
@@ -1229,7 +1246,7 @@ impl CoreStrategy for PyStrategy {
                 )
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-                let py_batch = batch.to_pyarrow(py)?;
+                let py_batch = record_batch_to_pyarrow(py, &batch)?;
                 strategy.call_method1("on_ticks", (py_batch, py_ctx.clone_ref(py)))?;
             } else {
                 // Fallback: call per-tick
@@ -1251,7 +1268,7 @@ impl CoreStrategy for PyStrategy {
         reports: &[OrderReport],
         ctx: &mut CoreContext<'_>,
     ) -> Result<(), Self::Error> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let strategy = self.obj.bind(py);
             let py_ctx = Py::new(
                 py,
@@ -1433,7 +1450,7 @@ fn parse_polars_data(
     explicit_symbol_map: Option<&HashMap<String, u32>>,
 ) -> PyResult<Vec<(i64, u64, EventKind)>> {
     let data_any = data.bind(py);
-    let data_dict = data_any.downcast::<PyDict>()?;
+    let data_dict = data_any.cast::<PyDict>()?;
 
     // Deterministic: do not rely on Python dict iteration order.
     let mut keys: Vec<String> = Vec::with_capacity(data_dict.len());
