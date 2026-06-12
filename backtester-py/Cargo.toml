@@ -9,6 +9,6 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 backtester-core = { path = "../backtester-core" }
-pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"] }
-arrow = { version = "55", features = ["pyarrow"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
+arrow = { version = "55", features = ["ffi"] }
 rayon = "1.11.0"

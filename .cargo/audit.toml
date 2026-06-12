@@ -7,9 +7,4 @@
 #
 # RUSTSEC-2024-0379: Multiple soundness issues in fast-float 0.2.0.
 #   Same root cause as above.
-#
-# RUSTSEC-2026-0176 / RUSTSEC-2026-0177: Out-of-bounds read in PyList/PyTuple
-# iterators and missing Sync bound on PyCFunction::new_closure in pyo3 0.24.2.
-#   Fixed in pyo3 >=0.29.0. Upgrading is a separate, larger effort tracked in #118
-#   due to PyO3 API changes between 0.24 and 0.29.
-ignore = ["RUSTSEC-2025-0003", "RUSTSEC-2024-0379", "RUSTSEC-2026-0176", "RUSTSEC-2026-0177"]
+ignore = ["RUSTSEC-2025-0003", "RUSTSEC-2024-0379"]
