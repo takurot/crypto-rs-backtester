@@ -22,6 +22,7 @@ impl Strategy for SubmitBuyOnce {
             self.submitted = true;
             ctx.submit_order(Order {
                 order_id: 0,
+                client_order_id: 0,
                 ts_submit: 0,
                 seq: 0,
                 symbol_id: tick.symbol_id,

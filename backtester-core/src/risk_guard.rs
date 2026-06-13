@@ -87,6 +87,7 @@ mod tests {
     fn make_order(side: Side, qty: i64) -> Order {
         Order {
             order_id: 1,
+            client_order_id: 0,
             ts_submit: 0,
             seq: 0,
             symbol_id: 1,

@@ -80,6 +80,8 @@ pub struct PyOrderReport {
     #[pyo3(get)]
     order_id: u64,
     #[pyo3(get)]
+    client_order_id: u64,
+    #[pyo3(get)]
     symbol_id: u32,
     #[pyo3(get)]
     status: String,
@@ -100,6 +102,7 @@ impl PyOrderReport {
     fn __getitem__(&self, key: &str) -> PyResult<Py<PyAny>> {
         Python::attach(|py| match key {
             "order_id" => Ok(self.order_id.into_pyobject(py)?.into_any().unbind()),
+            "client_order_id" => Ok(self.client_order_id.into_pyobject(py)?.into_any().unbind()),
             "symbol_id" => Ok(self.symbol_id.into_pyobject(py)?.into_any().unbind()),
             "status" => Ok(self.status.clone().into_pyobject(py)?.into_any().unbind()),
             "last_fill_qty" => Ok(self.last_fill_qty.into_pyobject(py)?.into_any().unbind()),
@@ -115,8 +118,9 @@ impl PyOrderReport {
 
     fn __repr__(&self) -> String {
         format!(
-            "OrderReport(order_id={}, symbol_id={}, status={}, last_fill_qty={}, filled_qty={}, remaining_qty={})",
+            "OrderReport(order_id={}, client_order_id={}, symbol_id={}, status={}, last_fill_qty={}, filled_qty={}, remaining_qty={})",
             self.order_id,
+            self.client_order_id,
             self.symbol_id,
             self.status,
             self.last_fill_qty,
@@ -130,6 +134,7 @@ impl PyOrderReport {
     fn get(&self, key: &str, default: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         Python::attach(|py| match key {
             "order_id" => Ok(self.order_id.into_pyobject(py)?.into_any().unbind()),
+            "client_order_id" => Ok(self.client_order_id.into_pyobject(py)?.into_any().unbind()),
             "symbol_id" => Ok(self.symbol_id.into_pyobject(py)?.into_any().unbind()),
             "status" => Ok(self.status.clone().into_pyobject(py)?.into_any().unbind()),
             "last_fill_qty" => Ok(self.last_fill_qty.into_pyobject(py)?.into_any().unbind()),
@@ -1063,6 +1068,7 @@ enum PyCommand {
         qty: i64,
         seq: u64,
         order_type: OrderType,
+        client_order_id: u64,
     },
     CancelOrder {
         order_id: u64,
@@ -1083,7 +1089,7 @@ impl PyContext {
         self.ts_local
     }
 
-    #[pyo3(signature = (symbol_id, side, price, qty, order_type = "limit"))]
+    #[pyo3(signature = (symbol_id, side, price, qty, order_type = "limit", client_order_id = 0))]
     pub fn submit_order(
         &mut self,
         symbol_id: u32,
@@ -1091,7 +1097,8 @@ impl PyContext {
         price: i64,
         qty: i64,
         order_type: &str,
-    ) -> PyResult<()> {
+        client_order_id: u64,
+    ) -> PyResult<u64> {
         let ot = match order_type {
             "limit" => OrderType::Limit,
             "market" => OrderType::Market,
@@ -1110,8 +1117,9 @@ impl PyContext {
             qty,
             seq,
             order_type: ot,
+            client_order_id,
         });
-        Ok(())
+        Ok(client_order_id)
     }
 
     pub fn cancel_order(&mut self, order_id: u64) -> PyResult<()> {
@@ -1317,12 +1325,14 @@ fn apply_py_ctx_commands(
                 qty,
                 seq,
                 order_type,
+                client_order_id,
             } => {
                 let side = Side::try_from(side).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("invalid side: {e}"))
                 })?;
                 ctx.submit_order(Order {
                     order_id: 0,
+                    client_order_id,
                     ts_submit: ctx.ts_local(),
                     seq,
                     symbol_id,
@@ -1391,6 +1401,7 @@ fn backtest_stats_to_pydict<'py>(
 fn order_report_to_pyobject(py: Python<'_>, r: &OrderReport) -> PyResult<Py<PyAny>> {
     let rep = PyOrderReport {
         order_id: r.order_id,
+        client_order_id: r.client_order_id,
         symbol_id: r.symbol_id,
         status: format!("{:?}", r.status),
         last_fill_qty: r.last_fill_qty,

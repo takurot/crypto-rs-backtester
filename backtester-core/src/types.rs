@@ -125,6 +125,8 @@ impl OrderState {
 #[repr(C)]
 pub struct OrderReport {
     pub order_id: u64,
+    /// Strategy-supplied identifier echoed back for correlation (0 = unset).
+    pub client_order_id: u64,
     pub last_fill_qty: i64,
     pub last_fill_price: i64,
     pub filled_qty: i64,
@@ -193,6 +195,8 @@ pub struct L3Update {
 #[repr(C)]
 pub struct Order {
     pub order_id: u64,
+    /// Strategy-supplied identifier echoed back in `OrderReport` for correlation (0 = unset).
+    pub client_order_id: u64,
     pub ts_submit: TsLocalNs,
     pub seq: u64,
     pub price: i64,
@@ -235,8 +239,8 @@ mod tests {
 
         assert_eq!(size_of::<Tick>(), 48);
         assert_eq!(size_of::<L2Update>(), 40);
-        assert_eq!(size_of::<Order>(), 48);
-        assert_eq!(size_of::<OrderReport>(), 64);
+        assert_eq!(size_of::<Order>(), 56);
+        assert_eq!(size_of::<OrderReport>(), 72);
         assert_eq!(size_of::<TradeFill>(), 48);
     }
 }

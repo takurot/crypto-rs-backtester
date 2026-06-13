@@ -187,6 +187,7 @@ impl Strategy for LoadStrategy {
             };
             ctx.submit_order(Order {
                 order_id: 0,
+                client_order_id: 0,
                 ts_submit: ctx.ts_local(),
                 seq: 0,
                 symbol_id: tick.symbol_id,

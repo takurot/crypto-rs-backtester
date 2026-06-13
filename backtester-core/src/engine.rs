@@ -874,6 +874,7 @@ impl<Q: QueueModel + Clone, S: Strategy, L: LatencyModel> Engine<Q, S, L> {
                             ts_delivery,
                             EventKind::OrderReport(OrderReport {
                                 order_id,
+                                client_order_id: order.client_order_id,
                                 symbol_id: order.symbol_id,
                                 status: OrderState::Rejected,
                                 last_fill_qty: 0,
@@ -965,6 +966,7 @@ mod tests {
             self.submitted = true;
             ctx.submit_order(Order {
                 order_id: 0,
+                client_order_id: 0,
                 ts_submit: ctx.ts_local(),
                 seq: 0,
                 symbol_id: tick.symbol_id,
@@ -1645,6 +1647,7 @@ mod tests {
             self.submitted = true;
             ctx.submit_order(Order {
                 order_id: 0,
+                client_order_id: 0,
                 ts_submit: ctx.ts_local(),
                 seq: 0,
                 symbol_id: tick.symbol_id,

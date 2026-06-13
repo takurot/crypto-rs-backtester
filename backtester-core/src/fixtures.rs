@@ -41,6 +41,7 @@ pub fn order_limit(
 ) -> Order {
     Order {
         order_id,
+        client_order_id: 0,
         ts_submit,
         seq,
         symbol_id: SYMBOL_ID_BTC_USDT,
