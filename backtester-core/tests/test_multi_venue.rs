@@ -31,6 +31,7 @@ impl Strategy for RecordingStrategy {
         self.submitted = true;
         ctx.submit_order(Order {
             order_id: 0,
+            client_order_id: 0,
             ts_submit: ctx.ts_local(),
             seq: 0,
             symbol_id: SYMBOL_A,
@@ -135,6 +136,7 @@ fn test_arbitrage_two_venues_smoke() {
                 self.submitted = true;
                 ctx.submit_order(Order {
                     order_id: 0,
+                    client_order_id: 0,
                     ts_submit: ctx.ts_local(),
                     seq: 0,
                     symbol_id: SYMBOL_A,
@@ -145,6 +147,7 @@ fn test_arbitrage_two_venues_smoke() {
                 });
                 ctx.submit_order(Order {
                     order_id: 0,
+                    client_order_id: 0,
                     ts_submit: ctx.ts_local(),
                     seq: 1,
                     symbol_id: SYMBOL_B,

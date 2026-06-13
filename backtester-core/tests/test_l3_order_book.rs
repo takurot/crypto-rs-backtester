@@ -59,6 +59,7 @@ fn l3_exact_queue_matches_manual_calculation_and_beats_conservative() {
 
     let order = Order {
         order_id: 99,
+        client_order_id: 0,
         ts_submit: 1_000,
         seq: 0,
         symbol_id: SYMBOL_ID,

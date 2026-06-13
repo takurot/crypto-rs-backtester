@@ -305,6 +305,7 @@ mod tests {
 
         let order = Order {
             order_id: 1,
+            client_order_id: 0,
             ts_submit: 1_000,
             seq: 0,
             symbol_id: fixtures::SYMBOL_ID_BTC_USDT,

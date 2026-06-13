@@ -155,6 +155,7 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
         o.state = OrderState::Open;
         Ok(OrderReport {
             order_id: o.order.order_id,
+            client_order_id: o.order.client_order_id,
             symbol_id: o.order.symbol_id,
             status: OrderState::Open,
             last_fill_qty: 0,
@@ -187,6 +188,7 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
                 o.state = OrderState::Cancelled;
                 Ok(OrderReport {
                     order_id: o.order.order_id,
+                    client_order_id: o.order.client_order_id,
                     symbol_id: o.order.symbol_id,
                     status: OrderState::Cancelled,
                     last_fill_qty: 0,
@@ -266,6 +268,7 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
             };
             Some(OrderReport {
                 order_id: o.order.order_id,
+                client_order_id: o.order.client_order_id,
                 symbol_id: o.order.symbol_id,
                 status,
                 last_fill_qty: fill_qty,
@@ -278,6 +281,7 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
             o.state = OrderState::Rejected;
             Some(OrderReport {
                 order_id: o.order.order_id,
+                client_order_id: o.order.client_order_id,
                 symbol_id: o.order.symbol_id,
                 status: OrderState::Rejected,
                 last_fill_qty: 0,
@@ -300,6 +304,7 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
         o.state = OrderState::Cancelled;
         Some(OrderReport {
             order_id: o.order.order_id,
+            client_order_id: o.order.client_order_id,
             symbol_id: o.order.symbol_id,
             status: OrderState::Cancelled,
             last_fill_qty: 0,
@@ -384,6 +389,7 @@ impl<Q: QueueModel> ExchangeSimulator<Q> {
 
                 reports.push(OrderReport {
                     order_id: o.order.order_id,
+                    client_order_id: o.order.client_order_id,
                     symbol_id: o.order.symbol_id,
                     status,
                     last_fill_qty: fill_qty,
@@ -410,6 +416,7 @@ mod tests {
         let mut ex = ExchangeSimulator::new(NoopQueue);
         let order = Order {
             order_id: 1,
+            client_order_id: 0,
             ts_submit: 1_000,
             seq: 0,
             symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
@@ -428,6 +435,7 @@ mod tests {
         let mut ex = ExchangeSimulator::new(NoopQueue);
         let order = Order {
             order_id: 1,
+            client_order_id: 0,
             ts_submit: 1_000,
             seq: 0,
             symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
@@ -444,6 +452,92 @@ mod tests {
     }
 
     #[test]
+    fn test_client_order_id_echoed_in_ack_and_cancel_reports() {
+        let mut ex = ExchangeSimulator::new(NoopQueue);
+        let order = Order {
+            order_id: 1,
+            client_order_id: 42,
+            ts_submit: 1_000,
+            seq: 0,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            price: 100,
+            qty: 1,
+        };
+
+        let id = ex.submit_order(order);
+        let ack = ex.ack_new(id).expect("ack");
+        assert_eq!(ack.client_order_id, 42);
+
+        ex.cancel_order(id).expect("cancel");
+        let cancel_ack = ex.ack_cancel(id).expect("ack cancel");
+        assert_eq!(cancel_ack.client_order_id, 42);
+    }
+
+    #[test]
+    fn test_client_order_id_echoed_in_fill_report() {
+        let mut ex = ExchangeSimulator::new(ConservativeQueue);
+        ex.apply_l2_update(&fixtures::l2_update(1_000, 0, 100, 0, Side::Buy));
+
+        let order = Order {
+            order_id: 1,
+            client_order_id: 7,
+            ts_submit: 1_000,
+            seq: 0,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            price: 100,
+            qty: 1,
+        };
+        let id = ex.submit_order(order);
+        ex.ack_new(id).expect("ack");
+
+        let trade = Tick {
+            ts_exchange: 2_000,
+            ts_local: 2_000,
+            seq: 0,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            price: 100,
+            qty: 1,
+            side: Side::Sell,
+            flags: 0,
+        };
+        let mut reports = Vec::new();
+        ex.on_trade(trade, &mut reports);
+
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].client_order_id, 7);
+        assert_eq!(reports[0].status, OrderState::Filled);
+    }
+
+    #[test]
+    fn test_client_order_id_echoed_in_market_order_rejected_report() {
+        let mut ex = ExchangeSimulator::new(NoopQueue);
+        // No asks in book: market buy is rejected.
+        let order = Order {
+            order_id: 1,
+            client_order_id: 99,
+            ts_submit: 1_000,
+            seq: 0,
+            symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
+            side: Side::Buy,
+            order_type: OrderType::Market,
+            price: 0,
+            qty: 1,
+        };
+        let id = ex.submit_order(order);
+
+        let report = ex
+            .fill_market_immediately(id, None)
+            .expect("fill_market_immediately should succeed");
+
+        assert_eq!(report.status, OrderState::Rejected);
+        assert_eq!(report.client_order_id, 99);
+    }
+
+    #[test]
     fn test_queue_conservative_user_is_last_in_queue() {
         let mut ex = ExchangeSimulator::new(ConservativeQueue);
 
@@ -452,6 +546,7 @@ mod tests {
 
         let order = Order {
             order_id: 1,
+            client_order_id: 0,
             ts_submit: 1_000,
             seq: 0,
             symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
@@ -523,6 +618,7 @@ mod tests {
 
         let order = Order {
             order_id: 1,
+            client_order_id: 0,
             ts_submit: 1_000,
             seq: 0,
             symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
@@ -567,6 +663,7 @@ mod tests {
     fn market_buy(symbol_id: u32, qty: i64) -> Order {
         Order {
             order_id: 1,
+            client_order_id: 0,
             ts_submit: 1_000,
             seq: 0,
             symbol_id,
@@ -580,6 +677,7 @@ mod tests {
     fn market_sell(symbol_id: u32, qty: i64) -> Order {
         Order {
             order_id: 2,
+            client_order_id: 0,
             ts_submit: 1_000,
             seq: 0,
             symbol_id,
@@ -737,6 +835,7 @@ mod tests {
 
         let order = Order {
             order_id: 99,
+            client_order_id: 0,
             ts_submit: 1_000,
             seq: 0,
             symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
@@ -779,6 +878,7 @@ mod tests {
 
         let order = Order {
             order_id: 10,
+            client_order_id: 0,
             ts_submit: 1_000,
             seq: 0,
             symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
@@ -829,6 +929,7 @@ mod tests {
 
                 let order = Order {
                     order_id: i + 1,
+                    client_order_id: 0,
                     ts_submit: 1_000,
                     seq: 0,
                     symbol_id: fixtures::SYMBOL_ID_BTC_USDT,
