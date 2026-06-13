@@ -31,6 +31,7 @@ review/
 # Local data and benchmark artifacts
 data/
 benchmark/
+baseline_results.txt
 run.log
 resume.txt
 temp/
