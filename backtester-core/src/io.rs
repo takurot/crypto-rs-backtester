@@ -150,7 +150,19 @@ mod tests {
     use arrow::array::Int64Array;
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::sync::mpsc::{Sender, channel};
+    use std::time::Duration;
+
+    /// Extracts the single `i64` value from a one-row, one-column batch
+    /// produced by `SlowIter`/`SyncIter` in these tests.
+    fn batch_value(batch: &RecordBatch) -> i64 {
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0)
+    }
 
     // Mock iterator that simulates slow I/O
     struct SlowIter {
@@ -177,52 +189,79 @@ mod tests {
         }
     }
 
+    /// An iterator whose `next()` blocks until the test grants permission,
+    /// reporting each fetch attempt on `started_tx` before blocking.
+    ///
+    /// This lets a test observe the background thread's progress
+    /// deterministically, without relying on wall-clock timing.
+    struct SyncIter {
+        count: usize,
+        current: usize,
+        started_tx: Sender<usize>,
+        proceed_rx: Receiver<()>,
+    }
+
+    impl Iterator for SyncIter {
+        type Item = Result<RecordBatch, ArrowError>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.current >= self.count {
+                return None;
+            }
+            self.current += 1;
+            self.started_tx.send(self.current).unwrap();
+            self.proceed_rx.recv().unwrap();
+
+            let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, false)]));
+            let arr = Int64Array::from(vec![self.current as i64]);
+            let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+            Some(Ok(batch))
+        }
+    }
+
     #[test]
-    #[ignore] // Flaky in CI due to timing checks
     fn test_async_batch_iter_overlap() {
-        // 5 items, 50ms each. Serial would take ~250ms.
-        // We consume them with 50ms processing time.
+        // Proves that the background thread fetches the next item(s) ahead
+        // of the consumer, using synchronization instead of wall-clock
+        // timing (which was flaky in CI).
         //
-        // Serial:
-        //   Read 1 (50ms) -> Process 1 (50ms) -> Read 2 (50ms) -> Process 2 (50ms)...
-        //   Total approx 500ms.
-        //
-        // Async (readahead 2):
-        //   Read 1 (50ms) starts.
-        //   Read 2 (50ms) starts immediately after 1 is pushed? No, sender blocks until read 1 done.
-        //   BUT:
-        //   T0: Worker starts Read 1. Main waits.
-        //   T50: Worker pushes 1. Starts Read 2. Main wakes, starts Process 1.
-        //   T100: Worker pushes 2. Starts Read 3. Main finishes Process 1, takes 2, starts Process 2.
-        //   ...
-        //   Effective throughput is mostly determined by max(Read, Process).
-        //   Total time ~ 50 (first read) + 4 * 50 (overlapped) + 50 (last process) = 300ms?
+        // With `readahead = 2`, the underlying `sync_channel` can hold up to
+        // 2 buffered batches before the worker's `send` blocks. So once item
+        // N is buffered, the worker immediately starts fetching item N+1
+        // without waiting for the consumer -- that's the `started_rx`
+        // sequence (1, 2, 3) asserted below, interleaved with `next()` calls.
+        let (started_tx, started_rx) = channel();
+        let (proceed_tx, proceed_rx) = channel();
 
-        let count = 5;
-        let delay = Duration::from_millis(50);
-
-        let iter = SlowIter {
-            count,
-            delay,
+        let iter = SyncIter {
+            count: 3,
             current: 0,
+            started_tx,
+            proceed_rx,
         };
 
-        // Create async iter
-        let async_iter = AsyncBatchIter::new(iter, 2);
+        let mut async_iter = AsyncBatchIter::new(iter, 2);
 
-        let start = Instant::now();
-        for _batch in async_iter {
-            // Simulate processing time
-            std::thread::sleep(delay);
-        }
-        let elapsed = start.elapsed();
+        // The worker starts fetching item 1 and blocks waiting for permission.
+        assert_eq!(started_rx.recv().unwrap(), 1);
+        proceed_tx.send(()).unwrap();
 
-        println!("Elapsed: {:?}", elapsed);
+        // Item 1 is now buffered, and the worker immediately starts fetching
+        // item 2 -- before the consumer has called `next()` even once. This
+        // is the overlap behavior under test.
+        assert_eq!(started_rx.recv().unwrap(), 2);
 
-        // Serial expectation: (50 read + 50 process) * 5 = 500ms
-        // Overlap expectation: 50 (initial read) + 50*4 (overlapped) + 50 (last process) = 300ms
-        // Allow some overhead, but it should be significantly less than 500ms.
-        assert!(elapsed < Duration::from_millis(450), "Should overlap I/O");
+        assert_eq!(batch_value(&async_iter.next().unwrap().unwrap()), 1);
+        proceed_tx.send(()).unwrap();
+
+        // Likewise, item 3's fetch starts before item 2 is consumed.
+        assert_eq!(started_rx.recv().unwrap(), 3);
+
+        assert_eq!(batch_value(&async_iter.next().unwrap().unwrap()), 2);
+        proceed_tx.send(()).unwrap();
+
+        assert_eq!(batch_value(&async_iter.next().unwrap().unwrap()), 3);
+        assert!(async_iter.next().is_none());
     }
 
     #[test]
@@ -239,12 +278,7 @@ mod tests {
         let mut next_val = 1;
         for item in async_iter {
             let batch = item.unwrap();
-            let arr = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap();
-            assert_eq!(arr.value(0), next_val);
+            assert_eq!(batch_value(&batch), next_val);
             next_val += 1;
         }
         assert_eq!(next_val, 11);

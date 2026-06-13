@@ -554,6 +554,7 @@ def make_minimal_ticks_lazyframe(*, with_seq: bool = True) -> pl.LazyFrame:
     - Pre-fetch next batch while processing current batch (double-buffering).
     - **Deliverable**: Hide I/O latency for disk-bound backtests.
     - **Notes**: Implementation uses threaded pre-fetching (`AsyncBatchIter`) to remain async-runtime agnostic in core. Achieved ~1.8x speedup in benchmarks.
+    - **Issue #102**: `test_async_batch_iter_overlap` was `#[ignore]`d due to wall-clock-timing flakiness. Rewrote it to deterministically prove prefetch overlap via mpsc rendezvous channels (no sleeps/timing thresholds); test now runs in CI.
 
 - [x] **7.4.3 Compressed Arrow Streams**
     - Support LZ4/ZSTD-compressed Arrow IPC streams to reduce I/O bandwidth.
